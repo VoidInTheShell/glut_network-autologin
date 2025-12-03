@@ -26,25 +26,25 @@ bash -c "$(curl -fsSLk https://gh-proxy.org/raw.githubusercontent.com/VoidInTheS
 
 ```bash
 # 方法1: 使用 SCP
-scp install.sh root@192.168.1.1:/tmp/
+scp install.sh root@[你的路由器IP]]:/tmp/
 
-# 方法2: 在路由器上使用 wget
-ssh root@192.168.1.1
+# 方法2: 在路由器上使用 wget下载
+# 首先ssh登录到路由器
 cd /tmp
-wget http://your-server/install.sh
+wget https://gh-proxy.org/raw.githubusercontent.com/VoidInTheShell/glut_network-autologin/refs/heads/main/install.sh
 ```
 
 ### 2. 运行安装脚本
 
 ```bash
 # SSH 登录到路由器
-ssh root@192.168.1.1
+ssh root@[你的路由器IP]
 
 # 添加执行权限
 chmod +x /tmp/install.sh
 
 # 运行安装程序
-/tmp/install.sh
+bash /tmp/install.sh
 ```
 
 ### 3. 按照提示配置
