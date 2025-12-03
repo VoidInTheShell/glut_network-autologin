@@ -1,4 +1,9 @@
 # 桂林理工大学南宁分校校园网自动登录服务安装程序
+在OpenWRT路由器上检测校园网登录状态并掉线重连，告别恶心的校园网自动掉线
+</div>
+
+> 在OpenWRT路由器上检测校园网登录状态并掉线重连，告别恶心的校园网自动掉线
+> 特别鸣谢[xhzLK123](https://github.com/xhzLK123)提供的登录入口
 
 ## 功能特性
 
@@ -13,7 +18,6 @@
 - ✅ 网络断线自动重连
 
 ## 快速开始
-
 ### 直接执行以下命令安装
 ```
 bash -c "$(curl -fsSLk https://gh-proxy.org/raw.githubusercontent.com/VoidInTheShell/glut_network-autologin/refs/heads/main/install.sh)"
