@@ -5,6 +5,7 @@
 ```
 LoginAutoSH/
 ├── install.sh          # 🚀 主安装脚本（一键配置）
+├── uninstall.sh        # 🗑️ 卸载脚本（完整清理）
 ├── login.sh            # 📄 原始登录脚本（已废弃，仅供参考）
 ├── test.sh             # 🔧 测试工具（安装前环境检测）
 ├── README.md           # 📖 完整使用文档
@@ -230,6 +231,22 @@ logread -f | grep autologin  # 实时查看
 
 ## 🗑️ 卸载方法
 
+**推荐：使用卸载脚本**
+```bash
+# 上传并运行卸载脚本
+scp uninstall.sh root@192.168.1.1:/tmp/
+ssh root@192.168.1.1 "chmod +x /tmp/uninstall.sh && /tmp/uninstall.sh"
+```
+
+**卸载脚本特性：**
+- 🔍 智能检测安装状态（支持部分安装）
+- 💾 可选配置备份（带时间戳）
+- 🛑 安全停止所有服务和进程
+- 🧹 完整清理所有文件和目录
+- ✅ 验证卸载完整性
+- 📊 详细的卸载报告
+
+**手动卸载**
 ```bash
 # 完整卸载
 /etc/init.d/autologin stop
@@ -237,6 +254,7 @@ logread -f | grep autologin  # 实时查看
 rm /etc/init.d/autologin
 rm /etc/config/autologin
 rm -rf /usr/local/autologin
+pkill -9 -f autologin
 
 # 确认删除
 ls /etc/init.d/autologin        # 应该提示不存在

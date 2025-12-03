@@ -49,25 +49,49 @@ check_dependencies() {
     print_info "检测依赖包..."
     local missing_deps=""
     local deps="wget curl"
+    local critical_cmds="ip ping sleep awk grep cut"
 
+    # 检查可通过opkg安装的依赖
     for dep in $deps; do
         if ! command -v $dep >/dev/null 2>&1; then
             missing_deps="$missing_deps $dep"
         fi
     done
 
+    # 检查关键系统命令（通常预装，但需验证）
+    local missing_critical=""
+    for cmd in $critical_cmds; do
+        if ! command -v $cmd >/dev/null 2>&1; then
+            missing_critical="$missing_critical $cmd"
+        fi
+    done
+
+    if [ -n "$missing_critical" ]; then
+        print_error "缺少关键系统命令:$missing_critical"
+        print_error "这些命令应该预装在OpenWrt中，请检查系统完整性"
+        return 1
+    fi
+
     if [ -n "$missing_deps" ]; then
         print_warn "缺失依赖包:$missing_deps"
         print_info "正在更新软件源..."
-        opkg update
+        if ! opkg update; then
+            print_error "软件源更新失败，请检查网络连接"
+            return 1
+        fi
 
         for dep in $missing_deps; do
             print_info "正在安装 $dep..."
-            opkg install $dep
+            if ! opkg install $dep; then
+                print_error "安装 $dep 失败"
+                return 1
+            fi
         done
     else
         print_info "所有依赖已满足"
     fi
+
+    return 0
 }
 
 # 获取 WAN 接口名称
@@ -157,7 +181,7 @@ interactive_config() {
     echo "  WAN 接口: $WAN_IF"
     echo "  登录账号: $USER_ACCOUNT"
     echo "  运营商: $([ "$ISP_CHOICE" = "1" ] && echo "联通" || echo "移动")"
-    echo "  检测频率: $CHECK_INTERVAL ms ($(echo "scale=1; $CHECK_INTERVAL/1000" | bc)秒)"
+    echo "  检测频率: $CHECK_INTERVAL ms ($((CHECK_INTERVAL/1000))秒)"
     if [ "$LOG_TYPE" = "1" ]; then
         echo "  日志文件: $LOG_FILE"
         echo "  日志大小: $LOG_SIZE_MB MB"
@@ -197,6 +221,45 @@ generate_login_script() {
 
 # 配置文件
 CONFIG_FILE="/etc/config/autologin"
+
+# ============ 命令兼容性检测 ============
+# 检查命令是否可用
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+# 验证关键命令
+check_required_commands() {
+    local missing=""
+    for cmd in ip ifconfig ping wget sleep; do
+        if ! command_exists "$cmd"; then
+            missing="$missing $cmd"
+        fi
+    done
+
+    if [ -n "$missing" ]; then
+        log_message "错误: 缺少必需命令:$missing"
+        return 1
+    fi
+    return 0
+}
+
+# 安全的sleep函数（确保参数为正整数）
+safe_sleep() {
+    local seconds="$1"
+    # 验证是否为数字
+    case "$seconds" in
+        ''|*[!0-9]*)
+            log_message "警告: sleep参数无效 ($seconds), 使用默认值30秒"
+            seconds=30
+            ;;
+    esac
+    # 确保至少sleep 1秒
+    if [ "$seconds" -lt 1 ]; then
+        seconds=1
+    fi
+    sleep "$seconds"
+}
 
 # 读取配置
 load_config() {
@@ -304,6 +367,25 @@ check_network() {
 main() {
     load_config
 
+    # 验证关键命令是否可用
+    if ! check_required_commands; then
+        exit 1
+    fi
+
+    # 验证配置参数
+    if [ -z "$WAN_INTERFACE" ] || [ -z "$USER_ACCOUNT" ] || [ -z "$USER_PASSWORD" ]; then
+        log_message "错误: 配置文件缺少必要参数"
+        exit 1
+    fi
+
+    # 验证CHECK_INTERVAL是否为有效数字
+    case "$CHECK_INTERVAL" in
+        ''|*[!0-9]*)
+            log_message "警告: CHECK_INTERVAL无效，使用默认值30000ms"
+            CHECK_INTERVAL=30000
+            ;;
+    esac
+
     log_message "=== 自动登录服务启动 ==="
     log_message "WAN 接口: $WAN_INTERFACE"
     log_message "检测频率: $CHECK_INTERVAL ms"
@@ -314,7 +396,7 @@ main() {
             do_login
 
             # 等待10秒后重新检查
-            sleep 10
+            safe_sleep 10
 
             if check_network; then
                 log_message "网络连接已恢复"
@@ -323,8 +405,12 @@ main() {
             fi
         fi
 
-        # 等待指定的检测间隔
-        sleep $(echo "scale=3; $CHECK_INTERVAL/1000" | bc)
+        # 等待指定的检测间隔（转换毫秒为秒，busybox sleep只支持整数）
+        local sleep_seconds=$((CHECK_INTERVAL / 1000))
+        if [ $sleep_seconds -lt 1 ]; then
+            sleep_seconds=1
+        fi
+        safe_sleep $sleep_seconds
     done
 }
 
@@ -468,7 +554,12 @@ main() {
     echo ""
 
     check_system
-    check_dependencies
+
+    if ! check_dependencies; then
+        print_error "依赖检测失败，安装终止"
+        exit 1
+    fi
+
     interactive_config
     create_directories
     generate_login_script

@@ -282,19 +282,37 @@ LOG_FILE="logger -t autologin"
 
 ### Q5: 如何卸载？
 
+**推荐方式：使用卸载脚本**
+```bash
+# 上传 uninstall.sh 到路由器
+scp uninstall.sh root@192.168.1.1:/tmp/
+
+# SSH 登录并运行
+ssh root@192.168.1.1
+chmod +x /tmp/uninstall.sh && /tmp/uninstall.sh
+```
+
+卸载脚本功能：
+- ✅ 自动检测安装状态
+- ✅ 可选配置备份
+- ✅ 安全停止所有服务和进程
+- ✅ 完整清理所有文件
+- ✅ 验证卸载结果
+- ✅ 支持部分安装的清理
+
+**手动卸载方式**
 ```bash
 # 停止并禁用服务
 /etc/init.d/autologin stop
 /etc/init.d/autologin disable
 
-# 删除服务文件
+# 删除所有文件
 rm /etc/init.d/autologin
-
-# 删除配置文件
 rm /etc/config/autologin
-
-# 删除程序目录
 rm -rf /usr/local/autologin
+
+# 终止残留进程
+pkill -9 -f autologin
 ```
 
 ### Q6: 如何修改检测频率？

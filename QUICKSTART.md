@@ -168,4 +168,24 @@ rm -rf /usr/local/autologin
 
 ---
 
+## 卸载方法
+
+```bash
+# 上传卸载脚本
+scp uninstall.sh root@192.168.1.1:/tmp/
+
+# 运行卸载
+ssh root@192.168.1.1
+chmod +x /tmp/uninstall.sh && /tmp/uninstall.sh
+```
+
+**卸载脚本会：**
+- 检测安装状态
+- 询问是否备份配置
+- 安全停止所有服务
+- 删除所有相关文件
+- 验证卸载完整性
+
+---
+
 详细文档请参考：[README.md](README.md)
