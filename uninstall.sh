@@ -103,7 +103,7 @@ check_installation() {
         fi
     fi
 
-    return $installed
+    # 不返回值，避免与set -e冲突
 }
 
 # 确认卸载
