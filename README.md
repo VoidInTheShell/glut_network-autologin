@@ -284,7 +284,10 @@ LOG_FILE="logger -t autologin"
 
 **推荐方式：使用卸载脚本**
 ```bash
-# 上传 uninstall.sh 到路由器
+#直接执行以下命令卸载
+bash -c "$(curl -fsSLk https://gh-proxy.org/raw.githubusercontent.com/VoidInTheShell/glut_network-autologin/refs/heads/main/uninstall.sh)"
+
+# 上述命令无法执行时手动下载并上传 uninstall.sh 到路由器
 scp uninstall.sh root@192.168.1.1:/tmp/
 
 # SSH 登录并运行
@@ -330,17 +333,6 @@ vi /etc/config/autologin
 
 ## 高级配置
 
-### 自定义登录 URL
-
-如果你的认证服务器地址不是 `10.10.11.11`，需要修改登录脚本：
-
-```bash
-vi /usr/local/autologin/login.sh
-
-# 找到构建 URL 的部分，修改服务器地址
-local url="http://YOUR_SERVER_IP:801/eportal/portal/login?..."
-```
-
 ### 添加多个检测服务器
 
 编辑登录脚本：
@@ -368,23 +360,3 @@ config system
 # 重启 syslog
 /etc/init.d/log restart
 ```
-
-## 技术支持
-
-- 原始脚本位置：`F:\0.00.Project\1.25.12.LoginAutoSH\login.sh`
-- 安装脚本位置：`F:\0.00.Project\1.25.12.LoginAutoSH\install.sh`
-
-## 许可证
-
-本脚本仅供学习和个人使用。使用者需遵守当地网络使用规定。
-
-## 更新日志
-
-### v1.0.0
-- 初始版本
-- 自动检测环境和安装依赖
-- 自动获取 WAN 口 IP
-- 交互式配置向导
-- 支持文件日志和 syslog
-- 日志大小限制和轮转
-- OpenWrt 服务集成
