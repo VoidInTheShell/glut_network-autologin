@@ -149,9 +149,35 @@ interactive_config() {
     read -p "请输入选项 (1/2) [默认: 1]: " ISP_CHOICE
     ISP_CHOICE=${ISP_CHOICE:-1}
 
-    # 检测频率
-    read -p "请输入网络检测频率 (毫秒) [默认: 30000]: " CHECK_INTERVAL
-    CHECK_INTERVAL=${CHECK_INTERVAL:-30000}
+    # 检测频率配置
+    echo ""
+    print_info "检测频率配置"
+    echo "系统使用双层检测策略："
+    echo "  • 本地检测: 高频检测认证服务器HTTP状态（快速发现断线）"
+    echo "  • 公网检测: 低频检测DNS连通性（辅助验证网络状态）"
+    echo ""
+
+    read -p "请输入本地检测频率 (秒) [默认: 1]: " LOCAL_CHECK_INTERVAL
+    LOCAL_CHECK_INTERVAL=${LOCAL_CHECK_INTERVAL:-1}
+
+    read -p "请输入公网检测频率 (秒) [默认: 30]: " PUBLIC_CHECK_INTERVAL
+    PUBLIC_CHECK_INTERVAL=${PUBLIC_CHECK_INTERVAL:-30}
+
+    read -p "请输入离线重连等待时间 (秒) [默认: 3]: " RECONNECT_INTERVAL
+    RECONNECT_INTERVAL=${RECONNECT_INTERVAL:-3}
+
+    # 公网DNS服务器配置
+    echo ""
+    print_info "公网DNS服务器配置"
+    echo "用于辅助验证网络连通性（负载均衡轮询）"
+    read -p "公网DNS服务器 [默认: 119.29.29.29 223.5.5.5 1.1.1.1]: " DNS_TEST_SERVERS
+    DNS_TEST_SERVERS=${DNS_TEST_SERVERS:-"119.29.29.29 223.5.5.5 1.1.1.1"}
+
+    # 固定启用的检测方法（移除公网HTTP重定向）
+    ENABLE_AUTH_HTTP="Y"
+    ENABLE_PUBLIC_HTTP="N"
+    ENABLE_PUBLIC_PING="Y"
+    HTTP_TEST_URLS=""
 
     # 日志配置
     echo ""
@@ -181,7 +207,16 @@ interactive_config() {
     echo "  WAN 接口: $WAN_IF"
     echo "  登录账号: $USER_ACCOUNT"
     echo "  运营商: $([ "$ISP_CHOICE" = "1" ] && echo "联通" || echo "移动")"
-    echo "  检测频率: $CHECK_INTERVAL ms ($((CHECK_INTERVAL/1000))秒)"
+    echo ""
+    echo "  检测频率:"
+    echo "    本地检测: 每 ${LOCAL_CHECK_INTERVAL} 秒"
+    echo "    公网检测: 每 ${PUBLIC_CHECK_INTERVAL} 秒"
+    echo "    离线重连等待: ${RECONNECT_INTERVAL} 秒"
+    echo ""
+    echo "  检测方法:"
+    echo "    ✓ 认证服务器HTTP状态检测 (本地高频)"
+    echo "    ✓ 公网DNS Ping检测 (辅助验证)"
+    echo ""
     if [ "$LOG_TYPE" = "1" ]; then
         echo "  日志文件: $LOG_FILE"
         echo "  日志大小: $LOG_SIZE_MB MB"
@@ -215,12 +250,20 @@ generate_login_script() {
     cat > "$SCRIPT_FILE" << 'EOFSCRIPT'
 #!/bin/sh
 #
-# 自动登录脚本
+# 自动登录脚本 - 双层检测状态机版本
 # 由安装程序自动生成
 #
 
 # 配置文件
 CONFIG_FILE="/etc/config/autologin"
+
+# 全局状态变量
+CURRENT_STATE="UNKNOWN"  # ONLINE, OFFLINE, UNKNOWN
+START_TIME=0
+LAST_PUBLIC_CHECK=0
+LAST_STATUS_LOG=0
+DNS_SERVER_INDEX=0
+OFFLINE_PUBLIC_CHECK_INTERVAL=10  # 离线状态下公网检测间隔（秒）
 
 # ============ 命令兼容性检测 ============
 # 检查命令是否可用
@@ -231,7 +274,7 @@ command_exists() {
 # 验证关键命令
 check_required_commands() {
     local missing=""
-    for cmd in ip ifconfig ping wget sleep; do
+    for cmd in ip ifconfig ping wget sleep date; do
         if ! command_exists "$cmd"; then
             missing="$missing $cmd"
         fi
@@ -250,8 +293,8 @@ safe_sleep() {
     # 验证是否为数字
     case "$seconds" in
         ''|*[!0-9]*)
-            log_message "警告: sleep参数无效 ($seconds), 使用默认值30秒"
-            seconds=30
+            log_message "警告: sleep参数无效 ($seconds), 使用默认值1秒"
+            seconds=1
             ;;
     esac
     # 确保至少sleep 1秒
@@ -259,6 +302,11 @@ safe_sleep() {
         seconds=1
     fi
     sleep "$seconds"
+}
+
+# 获取当前时间戳（秒）
+get_timestamp() {
+    date +%s
 }
 
 # 读取配置
@@ -327,6 +375,51 @@ log_message() {
     fi
 }
 
+# 日志输出函数（带强制标记，用于重要事件）
+log_message_force() {
+    log_message "$1"
+}
+
+# 状态摘要日志（每10分钟记录一次）
+log_status_summary() {
+    local current_time=$(get_timestamp)
+    local time_since_last_log=$((current_time - LAST_STATUS_LOG))
+
+    # 在线状态下每10分钟记录一次，离线状态不记录摘要
+    if [ "$CURRENT_STATE" = "ONLINE" ] && [ $time_since_last_log -ge 600 ]; then
+        LAST_STATUS_LOG=$current_time
+        log_message "==== 状态摘要 ===="
+        log_message "当前状态: 在线"
+        log_message "运行时长: $((current_time - START_TIME)) 秒"
+
+        # 执行一次完整检测并记录结果
+        local auth_result=""
+        local dns_result=""
+
+        # 本地认证服务器HTTP检测
+        check_auth_http_with_log
+        local auth_code=$?
+        case $auth_code in
+            0) auth_result="在线 (HTTP 200)" ;;
+            1) auth_result="离线 (未认证)" ;;
+            *) auth_result="不确定 (检测失败)" ;;
+        esac
+
+        # 公网DNS Ping检测
+        check_public_ping_with_log
+        local dns_code=$?
+        case $dns_code in
+            0) dns_result="可达" ;;
+            1) dns_result="不可达" ;;
+            *) dns_result="不确定" ;;
+        esac
+
+        log_message "  - 认证服务器状态: $auth_result"
+        log_message "  - 公网DNS状态: $dns_result"
+        log_message "=================="
+    fi
+}
+
 # 执行登录请求
 do_login() {
     local current_ip=$(get_wan_ip)
@@ -337,30 +430,275 @@ do_login() {
         return 1
     fi
 
-    log_message "当前 IP: $current_ip, MAC: $mac_address"
+    log_message "尝试登录 - IP: $current_ip, MAC: $mac_address"
 
     # 构建登录 URL
-    local url="http://10.10.11.11:801/eportal/portal/login?callback=dr1003&login_method=1&user_account=%2C0%2C${USER_ACCOUNT}&user_password=${USER_PASSWORD}&wlan_user_ip=${current_ip}&wlan_user_ipv6=&wlan_user_mac=000000000000&wlan_ac_ip=&wlan_ac_name=&page_index=pMnaGv1756888844&authex_enable=${ISP_CHOICE}&jsVersion=4.2.1&terminal_type=1&lang=zh-cn&lang=zh"
+    local url="http://${AUTH_SERVER}:${AUTH_PORT_801}/eportal/portal/login?callback=dr1003&login_method=1&user_account=%2C0%2C${USER_ACCOUNT}&user_password=${USER_PASSWORD}&wlan_user_ip=${current_ip}&wlan_user_ipv6=&wlan_user_mac=000000000000&wlan_ac_ip=&wlan_ac_name=&page_index=pMnaGv1756888844&authex_enable=${ISP_CHOICE}&jsVersion=4.2.1&terminal_type=1&lang=zh-cn&lang=zh"
 
     # 执行登录请求
-    local response=$(wget -qO- --timeout=10 "$url" 2>&1)
+    local response=$(wget -qO- --timeout=5 "$url" 2>&1)
     log_message "登录响应: $response"
 
     return 0
 }
 
-# 检查网络连接
-check_network() {
-    # 使用多个 DNS 服务器进行测试
-    local test_hosts="119.29.29.29 223.5.5.5 8.8.8.8"
+# ============================================
+# 检测方法
+# ============================================
 
-    for host in $test_hosts; do
-        if ping -c 1 -W 3 "$host" > /dev/null 2>&1; then
-            return 0
+# 方法1: 认证服务器HTTP状态检测（静默，不记录日志）
+check_auth_http() {
+    if [ "$ENABLE_AUTH_HTTP" != "Y" ] && [ "$ENABLE_AUTH_HTTP" != "y" ]; then
+        return 2
+    fi
+
+    local response=$(wget --timeout=2 --tries=1 --server-response -qO- "http://${AUTH_SERVER}/" 2>&1)
+    local wget_exit=$?
+
+    if [ $wget_exit -eq 0 ]; then
+        if echo "$response" | grep -q "Dr.COMWebLoginID_3.htm"; then
+            return 0  # 在线
+        elif echo "$response" | grep -q "Dr.COMWebLoginID_2.htm"; then
+            return 1  # 离线
         fi
+    fi
+    return 2  # 不确定
+}
+
+# 方法1: 认证服务器HTTP状态检测（带日志输出）
+check_auth_http_with_log() {
+    if [ "$ENABLE_AUTH_HTTP" != "Y" ] && [ "$ENABLE_AUTH_HTTP" != "y" ]; then
+        return 2
+    fi
+
+    local temp_file="/tmp/auth_http_check.$$"
+    local response=$(wget --timeout=2 --tries=1 --server-response -qO- "http://${AUTH_SERVER}/" 2>&1 | tee "$temp_file")
+    local wget_exit=$?
+
+    # 提取HTTP状态码
+    local http_code=$(grep "HTTP/" "$temp_file" | tail -1 | awk '{print $2}')
+    rm -f "$temp_file"
+
+    if [ -z "$http_code" ]; then
+        http_code="无响应"
+    fi
+
+    if [ $wget_exit -eq 0 ]; then
+        if echo "$response" | grep -q "Dr.COMWebLoginID_3.htm"; then
+            log_message "认证服务器HTTP检测: 在线 (状态码: $http_code)"
+            return 0  # 在线
+        elif echo "$response" | grep -q "Dr.COMWebLoginID_2.htm"; then
+            log_message "认证服务器HTTP检测: 离线/未认证 (状态码: $http_code)"
+            return 1  # 离线
+        else
+            log_message "认证服务器HTTP检测: 无法判断状态 (状态码: $http_code)"
+        fi
+    else
+        log_message "认证服务器HTTP检测: 连接失败 (退出码: $wget_exit)"
+    fi
+    return 2  # 不确定
+}
+
+# 方法2: 公网DNS Ping检测（静默，负载均衡轮询）
+check_public_ping() {
+    if [ "$ENABLE_PUBLIC_PING" != "Y" ] && [ "$ENABLE_PUBLIC_PING" != "y" ]; then
+        return 2
+    fi
+
+    # 将空格分隔的DNS转换为列表
+    local dns_list=""
+    for dns in $DNS_TEST_SERVERS; do
+        dns_list="$dns_list $dns"
     done
 
-    return 1
+    # 计算DNS数量
+    local dns_count=0
+    for dns in $dns_list; do
+        dns_count=$((dns_count + 1))
+    done
+
+    if [ $dns_count -eq 0 ]; then
+        return 2
+    fi
+
+    # 轮询选择DNS（负载均衡）
+    local current_index=0
+    local selected_dns=""
+    for dns in $dns_list; do
+        if [ $current_index -eq $DNS_SERVER_INDEX ]; then
+            selected_dns="$dns"
+            break
+        fi
+        current_index=$((current_index + 1))
+    done
+
+    # 更新索引（循环）
+    DNS_SERVER_INDEX=$(((DNS_SERVER_INDEX + 1) % dns_count))
+
+    # 先ping认证服务器（确保本地网络正常）
+    if ! ping -c 1 -W 1 "$AUTH_SERVER" >/dev/null 2>&1; then
+        return 1  # 本地网络故障
+    fi
+
+    # 再ping公网DNS
+    if [ -n "$selected_dns" ]; then
+        if ping -c 1 -W 2 "$selected_dns" >/dev/null 2>&1; then
+            return 0  # 在线
+        else
+            return 1  # 离线
+        fi
+    fi
+
+    return 2  # 不确定
+}
+
+# 方法2: 公网DNS Ping检测（带日志输出）
+check_public_ping_with_log() {
+    if [ "$ENABLE_PUBLIC_PING" != "Y" ] && [ "$ENABLE_PUBLIC_PING" != "y" ]; then
+        return 2
+    fi
+
+    # 将空格分隔的DNS转换为列表
+    local dns_list=""
+    for dns in $DNS_TEST_SERVERS; do
+        dns_list="$dns_list $dns"
+    done
+
+    # 计算DNS数量
+    local dns_count=0
+    for dns in $dns_list; do
+        dns_count=$((dns_count + 1))
+    done
+
+    if [ $dns_count -eq 0 ]; then
+        return 2
+    fi
+
+    # 轮询选择DNS（负载均衡）
+    local current_index=0
+    local selected_dns=""
+    for dns in $dns_list; do
+        if [ $current_index -eq $DNS_SERVER_INDEX ]; then
+            selected_dns="$dns"
+            break
+        fi
+        current_index=$((current_index + 1))
+    done
+
+    # 更新索引（循环）
+    DNS_SERVER_INDEX=$(((DNS_SERVER_INDEX + 1) % dns_count))
+
+    # 先ping认证服务器（确保本地网络正常）
+    if ! ping -c 1 -W 1 "$AUTH_SERVER" >/dev/null 2>&1; then
+        log_message "公网DNS Ping检测: 认证服务器 $AUTH_SERVER 不可达 (本地网络故障)"
+        return 1  # 本地网络故障
+    fi
+
+    # 再ping公网DNS
+    if [ -n "$selected_dns" ]; then
+        if ping -c 1 -W 2 "$selected_dns" >/dev/null 2>&1; then
+            log_message "公网DNS Ping检测: $selected_dns 可达 -> 在线"
+            return 0  # 在线
+        else
+            log_message "公网DNS Ping检测: $selected_dns 不可达 -> 离线"
+            return 1  # 离线
+        fi
+    fi
+
+    return 2  # 不确定
+}
+
+# ============================================
+# 状态机主逻辑
+# ============================================
+
+# 在线状态处理
+handle_online_state() {
+    # 定期记录状态摘要
+    log_status_summary
+
+    # 执行本地快速检测
+    check_auth_http
+    local auth_result=$?
+
+    if [ $auth_result -eq 1 ]; then
+        # 本地检测明确离线
+        log_message_force "*** 状态变化: 在线 -> 离线 (认证服务器检测失败) ***"
+        CURRENT_STATE="OFFLINE"
+        return
+    fi
+
+    # 检查是否需要执行公网验证
+    local current_time=$(get_timestamp)
+    local time_since_last_public=$((current_time - LAST_PUBLIC_CHECK))
+
+    if [ $time_since_last_public -ge $PUBLIC_CHECK_INTERVAL ]; then
+        LAST_PUBLIC_CHECK=$current_time
+        check_public_ping
+        local public_result=$?
+
+        if [ $public_result -eq 1 ]; then
+            # 公网检测失败，切换到离线状态
+            log_message_force "*** 状态变化: 在线 -> 离线 (公网DNS检测失败) ***"
+            CURRENT_STATE="OFFLINE"
+            return
+        fi
+    fi
+
+    # 仍然在线，等待下次检测
+    safe_sleep $LOCAL_CHECK_INTERVAL
+}
+
+# 离线状态处理
+handle_offline_state() {
+    log_message_force "检测到离线，立即尝试登录..."
+
+    # 立即执行登录
+    do_login
+
+    # 进入快速重连循环
+    local offline_loop_count=0
+    local last_offline_public_check=$(get_timestamp)
+
+    while true; do
+        offline_loop_count=$((offline_loop_count + 1))
+
+        # 等待配置的重连间隔
+        safe_sleep $RECONNECT_INTERVAL
+
+        # 检查认证服务器状态
+        check_auth_http_with_log
+        local auth_result=$?
+
+        # 检查是否需要执行公网DNS检测（离线状态下10秒检测一次）
+        local current_time=$(get_timestamp)
+        local time_since_offline_public=$((current_time - last_offline_public_check))
+        local public_result=2
+
+        if [ $time_since_offline_public -ge $OFFLINE_PUBLIC_CHECK_INTERVAL ]; then
+            last_offline_public_check=$current_time
+            check_public_ping_with_log
+            public_result=$?
+        fi
+
+        # 双重验证：认证服务器在线 AND 公网DNS可达
+        if [ $auth_result -eq 0 ] && [ $public_result -eq 0 ]; then
+            log_message_force "*** 状态变化: 离线 -> 在线 (双重验证成功) ***"
+            CURRENT_STATE="ONLINE"
+            LAST_STATUS_LOG=$(get_timestamp)  # 重置状态摘要计时
+            return
+        fi
+
+        # 仅认证服务器在线但公网DNS未检测或失败，继续循环
+        if [ $auth_result -eq 0 ] && [ $public_result -eq 2 ]; then
+            log_message "认证服务器已在线，等待公网DNS验证..."
+            continue
+        fi
+
+        # 仍然离线，继续尝试登录
+        log_message "网络仍然离线 (循环 #$offline_loop_count)，继续尝试登录..."
+        do_login
+    done
 }
 
 # 主循环
@@ -378,39 +716,92 @@ main() {
         exit 1
     fi
 
-    # 验证CHECK_INTERVAL是否为有效数字
-    case "$CHECK_INTERVAL" in
+    # 验证检测频率是否为有效数字
+    case "$LOCAL_CHECK_INTERVAL" in
         ''|*[!0-9]*)
-            log_message "警告: CHECK_INTERVAL无效，使用默认值30000ms"
-            CHECK_INTERVAL=30000
+            log_message "警告: LOCAL_CHECK_INTERVAL无效，使用默认值1秒"
+            LOCAL_CHECK_INTERVAL=1
             ;;
     esac
 
-    log_message "=== 自动登录服务启动 ==="
+    case "$PUBLIC_CHECK_INTERVAL" in
+        ''|*[!0-9]*)
+            log_message "警告: PUBLIC_CHECK_INTERVAL无效，使用默认值30秒"
+            PUBLIC_CHECK_INTERVAL=30
+            ;;
+    esac
+
+    case "$RECONNECT_INTERVAL" in
+        ''|*[!0-9]*)
+            log_message "警告: RECONNECT_INTERVAL无效，使用默认值3秒"
+            RECONNECT_INTERVAL=3
+            ;;
+    esac
+
+    # 确保检测频率至少为1秒
+    if [ $LOCAL_CHECK_INTERVAL -lt 1 ]; then
+        LOCAL_CHECK_INTERVAL=1
+    fi
+    if [ $PUBLIC_CHECK_INTERVAL -lt 1 ]; then
+        PUBLIC_CHECK_INTERVAL=1
+    fi
+    if [ $RECONNECT_INTERVAL -lt 1 ]; then
+        RECONNECT_INTERVAL=1
+    fi
+
+    log_message "=== 自动登录服务启动 (状态机模式) ==="
     log_message "WAN 接口: $WAN_INTERFACE"
-    log_message "检测频率: $CHECK_INTERVAL ms"
+    log_message "本地检测频率: ${LOCAL_CHECK_INTERVAL} 秒"
+    log_message "公网检测频率: ${PUBLIC_CHECK_INTERVAL} 秒 (在线状态)"
+    log_message "离线重连等待: ${RECONNECT_INTERVAL} 秒"
+    log_message "离线公网检测: ${OFFLINE_PUBLIC_CHECK_INTERVAL} 秒"
+    log_message "检测方法:"
+    [ "$ENABLE_AUTH_HTTP" = "Y" ] || [ "$ENABLE_AUTH_HTTP" = "y" ] && log_message "  - 认证服务器HTTP状态"
+    [ "$ENABLE_PUBLIC_PING" = "Y" ] || [ "$ENABLE_PUBLIC_PING" = "y" ] && log_message "  - 公网DNS Ping"
 
+    # 初始化时间戳
+    START_TIME=$(get_timestamp)
+    LAST_PUBLIC_CHECK=0
+    LAST_STATUS_LOG=$START_TIME
+
+    # 初始化状态为UNKNOWN，进行首次检测
+    CURRENT_STATE="UNKNOWN"
+    log_message "执行初始状态检测..."
+
+    check_auth_http
+    local initial_auth=$?
+
+    if [ $initial_auth -eq 0 ]; then
+        # 认证服务器在线，验证公网
+        check_public_ping
+        local initial_public=$?
+
+        if [ $initial_public -eq 0 ]; then
+            log_message "初始状态: 在线"
+            CURRENT_STATE="ONLINE"
+        else
+            log_message "初始状态: 离线 (公网不可达)"
+            CURRENT_STATE="OFFLINE"
+        fi
+    else
+        log_message "初始状态: 离线"
+        CURRENT_STATE="OFFLINE"
+    fi
+
+    # 状态机主循环
     while true; do
-        if ! check_network; then
-            log_message "网络连接失败，尝试重新登录..."
-            do_login
-
-            # 等待10秒后重新检查
-            safe_sleep 10
-
-            if check_network; then
-                log_message "网络连接已恢复"
-            else
-                log_message "网络仍然无法连接，将在下次循环重试"
-            fi
-        fi
-
-        # 等待指定的检测间隔（转换毫秒为秒，busybox sleep只支持整数）
-        local sleep_seconds=$((CHECK_INTERVAL / 1000))
-        if [ $sleep_seconds -lt 1 ]; then
-            sleep_seconds=1
-        fi
-        safe_sleep $sleep_seconds
+        case "$CURRENT_STATE" in
+            ONLINE)
+                handle_online_state
+                ;;
+            OFFLINE)
+                handle_offline_state
+                ;;
+            *)
+                log_message "错误: 未知状态 $CURRENT_STATE，重置为OFFLINE"
+                CURRENT_STATE="OFFLINE"
+                ;;
+        esac
     done
 }
 
@@ -440,8 +831,23 @@ USER_PASSWORD="$USER_PASSWORD"
 # 运营商选择 (1=联通, 2=移动)
 ISP_CHOICE="$ISP_CHOICE"
 
-# 检测频率 (毫秒)
-CHECK_INTERVAL="$CHECK_INTERVAL"
+# 认证服务器配置
+AUTH_SERVER="10.10.11.11"
+AUTH_PORT_801="801"
+AUTH_PORT_80="80"
+
+# 检测频率配置 (秒)
+LOCAL_CHECK_INTERVAL="$LOCAL_CHECK_INTERVAL"
+PUBLIC_CHECK_INTERVAL="$PUBLIC_CHECK_INTERVAL"
+RECONNECT_INTERVAL="$RECONNECT_INTERVAL"
+
+# 检测方法开关
+ENABLE_AUTH_HTTP="$ENABLE_AUTH_HTTP"
+ENABLE_PUBLIC_HTTP="$ENABLE_PUBLIC_HTTP"
+ENABLE_PUBLIC_PING="$ENABLE_PUBLIC_PING"
+
+# 公网测试服务器配置
+DNS_TEST_SERVERS="$DNS_TEST_SERVERS"
 
 # 日志配置
 LOG_TYPE="$LOG_TYPE"
