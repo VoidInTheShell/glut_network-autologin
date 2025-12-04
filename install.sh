@@ -3,8 +3,16 @@
 # OpenWrt 自动登录服务安装脚本
 # 自动检测环境、安装依赖、配置服务
 #
+# 版本: v1.2.1 (2025-12-04)
+# 更新: 关键问题修复版
+#
 
 set -e
+
+# 版本信息
+VERSION="v1.2.1b"
+VERSION_DATE="2025-12-04"
+VERSION_DESC="日志增强"
 
 INSTALL_DIR="/usr/local/autologin"
 CONFIG_FILE="/etc/config/autologin"
@@ -344,10 +352,34 @@ generate_login_script() {
 # 自动登录脚本 - 智能日志系统增强版
 # 由安装程序自动生成
 #
+EOFSCRIPT
 
+    # 插入版本信息（使用变量替换）
+    cat >> "$SCRIPT_FILE" << EOF
+# 版本: $VERSION ($VERSION_DATE)
+# 说明: $VERSION_DESC
+#
+
+EOF
+
+    # 继续写入脚本内容
+    cat >> "$SCRIPT_FILE" << 'EOFSCRIPT'
 # 配置文件
 CONFIG_FILE="/etc/config/autologin"
 
+# 脚本版本信息（由安装程序自动写入）
+EOFSCRIPT
+
+    # 写入版本变量
+    cat >> "$SCRIPT_FILE" << EOF
+SCRIPT_VERSION="$VERSION"
+SCRIPT_VERSION_DATE="$VERSION_DATE"
+SCRIPT_VERSION_DESC="$VERSION_DESC"
+
+EOF
+
+    # 继续写入脚本内容
+    cat >> "$SCRIPT_FILE" << 'EOFSCRIPT'
 # 全局状态变量
 CURRENT_STATE="UNKNOWN"  # ONLINE, SUSPECT, OFFLINE, RECOVERING, UNKNOWN
 CURRENT_SESSION_START=0  # 当前会话开始时间
@@ -618,6 +650,18 @@ log_with_level() {
         # 文件日志模式：写入实时日志
         echo "$log_line" >> "$REALTIME_LOG_FILE"
 
+        # 故障级别日志同时写入持久化日志（立即写入，不等待切割）
+        case "$level" in
+            OFFLINE|AUTH|ONLINE|ERROR|WARN|STAT)
+                # 确保持久化日志目录存在
+                local log_dir=$(dirname "$PERSISTENT_LOG_FILE")
+                [ ! -d "$log_dir" ] && mkdir -p "$log_dir"
+
+                # 追加到持久化日志
+                echo "$log_line" >> "$PERSISTENT_LOG_FILE"
+                ;;
+        esac
+
         # 检查实时日志大小，触发切割
         check_and_rotate_log
     elif [ "$LOG_TYPE" = "2" ]; then
@@ -648,19 +692,12 @@ check_and_rotate_log() {
 rotate_realtime_log() {
     log_with_level "INFO" "实时日志达到${REALTIME_LOG_SIZE_MB}MB，开始智能切割..."
 
-    # 提取故障事件和最后的状态摘要
-    local fault_log="/tmp/fault_events_$$.tmp"
-    extract_fault_events "$REALTIME_LOG_FILE" "$fault_log"
-
-    # 追加到持久化日志
-    if [ -f "$fault_log" ] && [ -s "$fault_log" ]; then
-        cat "$fault_log" >> "$PERSISTENT_LOG_FILE"
-        rm -f "$fault_log"
-    fi
+    # 注意：故障事件已通过log_with_level()实时写入persistent.log
+    # 此处仅需清空实时日志并记录切割标记
 
     # 清空实时日志并记录切割标记
     local timestamp=$(date +'%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] [INFO] 日志已切割，故障事件已归档到持久化日志" > "$REALTIME_LOG_FILE"
+    echo "[$timestamp] [INFO] 日志已切割（故障事件已实时归档到持久化日志）" > "$REALTIME_LOG_FILE"
 
     # 检查持久化日志大小
     trim_persistent_log
@@ -739,14 +776,28 @@ generate_stat_summary() {
 
     # 输出状态摘要
     log_with_level "STAT" "========== 状态摘要 =========="
+    log_with_level "STAT" "服务启动时间: $(format_datetime $FIRST_START_TIME)"
+    log_with_level "STAT" "最后重启时间: $(format_datetime $LAST_START_TIME)"
     log_with_level "STAT" "总运行时长: $(format_duration $total_runtime)"
     log_with_level "STAT" "本次在线时长: $(format_duration $online_duration)"
+    log_with_level "STAT" "本次上线时间: $(format_datetime $ONLINE_SINCE)"
     log_with_level "STAT" "历史离线次数: ${OFFLINE_COUNT}次"
     log_with_level "STAT" "上次离线时间: $(format_datetime $LAST_OFFLINE_TIME)"
     log_with_level "STAT" "上次离线原因: DNS失败[$LAST_OFFLINE_DNS_FAIL] | 并行验证失败[$LAST_OFFLINE_PARALLEL_FAIL] | 认证响应[$LAST_OFFLINE_AUTH_RESPONSE]"
     log_with_level "STAT" "上次恢复耗时: ${LAST_RECOVERY_DURATION}秒"
     log_with_level "STAT" "总认证次数: ${AUTH_TOTAL_COUNT}次 (平均${avg_auth})"
-    log_with_level "STAT" "DNS失败统计: 119.29.29.29(${DNS_FAIL_119}次) 223.5.5.5(${DNS_FAIL_223}次) 8.8.8.8(${DNS_FAIL_8}次) 1.1.1.1(${DNS_FAIL_1}次)"
+
+    # 动态生成DNS失败统计（仅显示配置的DNS服务器）
+    local dns_stats=""
+    for dns in $DNS_TEST_SERVERS; do
+        local dns_key=$(get_dns_stat_key "$dns")
+        local fail_count=$(eval echo \$${dns_key})
+        # 如果fail_count为空，设置为0
+        [ -z "$fail_count" ] && fail_count=0
+        dns_stats="${dns_stats}${dns}(${fail_count}次) "
+    done
+    log_with_level "STAT" "DNS失败统计: ${dns_stats}"
+
     log_with_level "STAT" "最长在线时长: $(format_duration $MAX_ONLINE_DURATION)"
     log_with_level "STAT" "平均恢复耗时: ${avg_recovery}"
 
@@ -924,11 +975,6 @@ check_public_ping_parallel() {
         return 2
     fi
 
-    # 先ping认证服务器（确保本地网络正常）
-    if ! ping -c 1 -W 1 "$AUTH_SERVER" >/dev/null 2>&1; then
-        return 1  # 本地网络故障
-    fi
-
     # 并行检测所有DNS服务器（快速判定）
     local success_count=0
     local fail_count=0
@@ -941,12 +987,20 @@ check_public_ping_parallel() {
         fi
     done
 
-    # 判断逻辑：任意1个成功即在线，2个以上失败才离线
+    # 判断逻辑：至少1个DNS成功即在线
     if [ $success_count -ge 1 ]; then
         return 0  # 至少1个在线，判定在线
-    else
-        return 1  # 全部失败，判定离线
     fi
+
+    # 所有DNS失败，用HTTP验证认证服务器
+    check_auth_http
+    local http_result=$?
+    if [ $http_result -eq 0 ]; then
+        return 0  # HTTP在线，可能是DNS问题
+    fi
+
+    # DNS和HTTP都失败，确认离线
+    return 1
 }
 
 # 方法2a: 公网DNS Ping检测（并行模式，带日志）
@@ -969,12 +1023,6 @@ check_public_ping_parallel_with_log() {
 
     if [ $dns_count -eq 0 ]; then
         return 2
-    fi
-
-    # 先ping认证服务器（确保本地网络正常）
-    if ! ping -c 1 -W 1 "$AUTH_SERVER" >/dev/null 2>&1; then
-        log_with_level "OFFLINE" "认证服务器 $AUTH_SERVER 不可达 (本地网络故障)"
-        return 1
     fi
 
     # 并行检测所有DNS服务器
@@ -1007,8 +1055,21 @@ check_public_ping_parallel_with_log() {
     if [ $success_count -ge 1 ]; then
         log_with_level "ONLINE" "判定: 在线 (至少1个DNS可达)"
         return 0
+    fi
+
+    # 所有DNS失败，用HTTP验证认证服务器
+    log_with_level "CHECK" "所有DNS失败，验证认证服务器HTTP状态..."
+    check_auth_http
+    local http_result=$?
+
+    if [ $http_result -eq 0 ]; then
+        log_with_level "ONLINE" "判定: 在线 (DNS不可达但HTTP在线，可能是DNS问题)"
+        return 0
+    elif [ $http_result -eq 1 ]; then
+        log_with_level "OFFLINE" "判定: 离线 (DNS和HTTP均不可达)"
+        return 1
     else
-        log_with_level "OFFLINE" "判定: 离线 (所有DNS不可达)"
+        log_with_level "OFFLINE" "判定: 离线 (DNS全部失败，HTTP状态不确定)"
         return 1
     fi
 }
@@ -1406,7 +1467,8 @@ main() {
         RECONNECT_INTERVAL=1
     fi
 
-    log_with_level "INFO" "=== 自动登录服务启动 (智能日志增强版) ==="
+    log_with_level "INFO" "=== 自动登录服务启动 ==="
+    log_with_level "INFO" "版本: $SCRIPT_VERSION ($SCRIPT_VERSION_DESC)"
     log_with_level "INFO" "WAN 接口: $WAN_INTERFACE"
     log_with_level "INFO" ""
     log_with_level "INFO" "检测策略:"
@@ -1652,32 +1714,26 @@ main() {
     echo ""
     print_info "========================================"
     print_info "  OpenWrt 自动登录服务安装程序"
+    print_info "           版本: $VERSION"
     print_info "========================================"
     echo ""
 
     # 显示版本更新信息
-    echo -e "${GREEN}📦 v1.2.0b 新版本特性 (智能日志增强版)${NC}"
+    echo -e "${GREEN}📦 $VERSION 新版本特性 ($VERSION_DESC)${NC}"
     echo ""
-    echo "✨ 双层日志架构："
-    echo "   • 实时日志: /tmp/autologin/ (内存，快速)"
-    echo "   • 故障日志: /usr/local/autologin/logs/persistent.log (持久化)"
+    echo "🔧 关键问题修复："
+    echo "   • persistent.log 立即写入（不等待切割）"
+    echo "   • 移除禁ping误判逻辑（DNS+HTTP双重验证）"
+    echo "   • DNS统计动态生成（适配用户配置）"
+    echo "   • 时间显示格式优化（人类可读）"
     echo ""
-    echo "📊 完整运行统计："
-    echo "   • 总运行时长、本次在线时长"
-    echo "   • 历史离线次数、上次离线时间/原因"
-    echo "   • 认证统计、DNS失败统计"
-    echo "   • 自动生成状态摘要 (默认每小时)"
+    echo "✨ 继承 v1.2.0b 特性："
+    echo "   • 双层日志架构（实时+持久化）"
+    echo "   • 完整运行统计与故障追踪"
+    echo "   • 结构化日志级别与智能切割"
+    echo "   • 智能告警机制"
     echo ""
-    echo "🎯 智能日志分级："
-    echo "   • 故障事件自动编号追踪"
-    echo "   • 日志切割时自动过滤心跳，仅保留故障"
-    echo "   • 结构化日志格式 (INFO/CHECK/OFFLINE/AUTH/ONLINE/ERROR/WARN/STAT)"
-    echo ""
-    echo "⚠️  告警机制："
-    echo "   • 每小时离线次数超限告警"
-    echo "   • 连续认证失败告警"
-    echo ""
-    echo -e "${YELLOW}💡 提示: 如从旧版本升级，建议先运行 uninstall.sh 卸载${NC}"
+    echo -e "${YELLOW}💡 提示: 从 v1.2.0b 升级无破坏性变更，配置完全兼容${NC}"
     echo ""
     read -p "按回车键继续安装..."
     echo ""
