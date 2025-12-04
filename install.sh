@@ -10,7 +10,7 @@
 set -e
 
 # 版本信息
-VERSION="v1.2.1b"
+VERSION="v1.2.2b"
 VERSION_DATE="2025-12-04"
 VERSION_DESC="日志增强"
 
