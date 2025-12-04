@@ -467,7 +467,15 @@ format_datetime() {
     if [ "$timestamp" -eq 0 ] || [ -z "$timestamp" ]; then
         echo "未知"
     else
-        date -d "@$timestamp" '+%Y-%m-%d %H:%M' 2>/dev/null || date -r "$timestamp" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "未知"
+        # Busybox date 支持 -D 参数或 @timestamp 格式
+        # 方法1: 使用 @ 前缀（busybox 标准格式，无引号）
+        date -d @$timestamp '+%Y-%m-%d %H:%M' 2>/dev/null || \
+        # 方法2: 使用 -r 参数（某些busybox版本）
+        date -r $timestamp '+%Y-%m-%d %H:%M' 2>/dev/null || \
+        # 方法3: GNU date 格式（标准Linux，带引号）
+        date -d "@$timestamp" '+%Y-%m-%d %H:%M' 2>/dev/null || \
+        # 方法4: 如果都失败，显示原始时间戳（便于调试）
+        echo "$(date '+%Y-%m-%d %H:%M') [TS:$timestamp]"
     fi
 }
 
@@ -487,13 +495,14 @@ load_config() {
 init_state_file() {
     if [ ! -f "$STATE_FILE" ]; then
         local now=$(get_timestamp)
+        local now_readable=$(date -d "@$now" "+%a %b %e %H:%M:%S CST %Y" 2>/dev/null || date "+%a %b %e %H:%M:%S CST %Y")
         cat > "$STATE_FILE" << EOF
 # 自动登录服务运行状态
 # 此文件由系统自动维护，请勿手动编辑
 
 # 服务运行统计
-FIRST_START_TIME=$now
-LAST_START_TIME=$now
+FIRST_START_TIME=$now  # $now_readable
+LAST_START_TIME=$now  # $now_readable
 TOTAL_OFFLINE_SECONDS=0
 
 # 离线统计
@@ -501,11 +510,11 @@ OFFLINE_COUNT=0
 CURRENT_EVENT_ID=0
 
 # 在线状态
-ONLINE_SINCE=0
+ONLINE_SINCE=0  # 未上线
 MAX_ONLINE_DURATION=0
 
 # 上次离线信息
-LAST_OFFLINE_TIME=0
+LAST_OFFLINE_TIME=0  # 从未离线
 LAST_OFFLINE_DNS_FAIL=""
 LAST_OFFLINE_PARALLEL_FAIL=""
 LAST_OFFLINE_AUTH_RESPONSE=""
@@ -524,11 +533,11 @@ DNS_FAIL_1=0
 DNS_FAIL_114=0
 
 # 状态摘要
-LAST_STAT_TIME=$now
+LAST_STAT_TIME=$now  # $now_readable
 
 # 告警统计
 LAST_HOUR_OFFLINE_COUNT=0
-LAST_HOUR_START_TIME=$now
+LAST_HOUR_START_TIME=$now  # $now_readable
 CONSECUTIVE_AUTH_FAILURES=0
 EOF
     fi
@@ -559,13 +568,40 @@ update_state() {
     # 使用临时文件避免并发问题
     local tmp_file="${STATE_FILE}.tmp"
 
+    # 判断是否为时间戳字段，需要添加可读格式注释
+    local comment=""
+    case "$key" in
+        FIRST_START_TIME|LAST_START_TIME|LAST_STAT_TIME|LAST_HOUR_START_TIME)
+            # 时间戳字段，添加可读格式
+            if [ "$value" -gt 0 ]; then
+                comment="  # $(date -d "@$value" "+%a %b %e %H:%M:%S CST %Y" 2>/dev/null || date "+%a %b %e %H:%M:%S CST %Y")"
+            fi
+            ;;
+        ONLINE_SINCE)
+            # 在线时间字段
+            if [ "$value" -gt 0 ]; then
+                comment="  # $(date -d "@$value" "+%a %b %e %H:%M:%S CST %Y" 2>/dev/null || date "+%a %b %e %H:%M:%S CST %Y")"
+            else
+                comment="  # 未上线"
+            fi
+            ;;
+        LAST_OFFLINE_TIME)
+            # 离线时间字段
+            if [ "$value" -gt 0 ]; then
+                comment="  # $(date -d "@$value" "+%a %b %e %H:%M:%S CST %Y" 2>/dev/null || date "+%a %b %e %H:%M:%S CST %Y")"
+            else
+                comment="  # 从未离线"
+            fi
+            ;;
+    esac
+
     # 如果字段存在则更新，否则追加
     if grep -q "^${key}=" "$STATE_FILE" 2>/dev/null; then
         grep -v "^${key}=" "$STATE_FILE" > "$tmp_file"
-        echo "${key}=${value}" >> "$tmp_file"
+        echo "${key}=${value}${comment}" >> "$tmp_file"
         mv "$tmp_file" "$STATE_FILE"
     else
-        echo "${key}=${value}" >> "$STATE_FILE"
+        echo "${key}=${value}${comment}" >> "$STATE_FILE"
     fi
 }
 
