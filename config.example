@@ -1,16 +1,15 @@
 # 自动登录服务配置文件示例
 #
+# 版本: v1.2.1b (日志增强)
 # 此文件展示了所有可配置的选项
 # 实际配置文件会在安装时自动生成到：/etc/config/autologin
 
-# ==================== 网络配置 ====================
+# ==================== 核心配置 ====================
 
 # WAN 接口名称
 # 常见值：eth1, wan, eth0.2, pppoe-wan
 # 安装程序会自动检测，通常无需修改
 WAN_INTERFACE="eth1"
-
-# ==================== 登录凭证 ====================
 
 # 登录账号（必填）
 USER_ACCOUNT="your_student_id"
@@ -23,50 +22,167 @@ USER_PASSWORD="your_password"
 # 2 = 移动
 ISP_CHOICE="1"
 
-# ==================== 监测配置 ====================
+# ==================== 认证服务器配置 ====================
 
-# 网络检测频率（单位：毫秒）
-# 建议值：
-#   - 高频监测：10000 (10秒) - 适合需要快速重连的场景
-#   - 标准监测：30000 (30秒) - 推荐，平衡性能和及时性
-#   - 低频监测：60000 (60秒) - 适合稳定网络，减少系统负载
-CHECK_INTERVAL="30000"
+# 认证服务器地址
+AUTH_SERVER="10.10.11.11"
 
-# ==================== 日志配置 ====================
+# 认证端口
+AUTH_PORT_801="801"
+AUTH_PORT_80="80"
+
+# ==================== 网络检测配置 ====================
+
+# 公网DNS检测频率（单位：秒）
+# 推荐值：10-30秒
+# 说明：在线状态下轮询检测DNS连通性的间隔
+DNS_CHECK_INTERVAL="10"
+
+# 本地HTTP检测频率（单位：秒）
+# 最小值：60秒（防止被强制登出）
+# 推荐值：60-120秒
+# 说明：检测认证服务器HTTP状态的间隔
+AUTH_HTTP_CHECK_INTERVAL="60"
+
+# 离线状态重连等待时间（单位：秒）
+# 推荐值：3-5秒
+# 说明：离线后快速重连循环中的等待间隔
+RECONNECT_INTERVAL="3"
+
+# DNS离线判定策略
+# 1   = 任何1个DNS失败就离线（最敏感，可能误判）
+# 2   = 至少2个DNS失败才离线（推荐，平衡误判和延迟）
+# 999 = 所有DNS都失败才离线（最保守，可能延迟发现断线）
+DNS_FAILURE_THRESHOLD="2"
+
+# 在线判定策略
+# 1 = 仅依赖DNS检测（DNS达到阈值即判定在线）
+# 2 = DNS + HTTP双重验证（至少1个DNS可达 + 本地HTTP在线）
+ONLINE_VERIFY_STRATEGY="2"
+
+# 公网DNS服务器列表（空格分隔）
+# 用于负载均衡轮询检测
+DNS_TEST_SERVERS="119.29.29.29 223.5.5.5 1.1.1.1"
+
+# 检测方法开关
+ENABLE_AUTH_HTTP="Y"    # 启用认证服务器HTTP检测
+ENABLE_PUBLIC_HTTP="N"  # 禁用公网HTTP重定向（已移除）
+ENABLE_PUBLIC_PING="Y"  # 启用公网DNS Ping检测
+
+# ==================== 智能日志系统配置 (v1.2.0b+) ====================
 
 # 日志类型
-# 1 = 文件日志（可配置大小限制）
+# 1 = 文件日志（双层架构：实时+持久化）
 # 2 = syslog（系统日志）
 # 3 = 禁用日志（输出到 /dev/null）
 LOG_TYPE="1"
 
-# 日志文件路径（LOG_TYPE=1 时有效）
-LOG_FILE="/usr/local/autologin/logs/autologin.log"
+# ========== 文件日志模式专用配置 (LOG_TYPE=1) ==========
 
-# 日志文件大小限制（单位：MB）
-# 当日志文件超过此大小时，会自动轮转
-# 旧日志会被重命名为 *.log.old
-# 建议值：5-20 MB
+# 实时日志路径（存储在内存中，快速写入）
+# 包含所有日志级别（INFO/CHECK/OFFLINE/AUTH/ONLINE/ERROR/WARN/STAT）
+REALTIME_LOG_FILE="/tmp/autologin/autologin.log"
+
+# 实时日志切割阈值（单位：MB）
+# 达到此大小时自动切割
+# 推荐值：2-5 MB
+REALTIME_LOG_SIZE_MB="2"
+
+# 持久化故障日志路径（存储在闪存中，重启后保留）
+# 仅包含故障相关事件（OFFLINE/AUTH/ONLINE/ERROR/WARN/STAT）
+PERSISTENT_LOG_FILE="/usr/local/autologin/logs/persistent.log"
+
+# 持久化日志大小限制（单位：MB）
+# 超过此大小时自动修剪最旧事件
+# 推荐值：5-20 MB
 LOG_SIZE_MB="10"
+
+# 状态摘要输出间隔（单位：秒）
+# 自动输出完整运行统计
+# 推荐值：3600秒（1小时）
+STAT_INTERVAL="3600"
+
+# 离线次数告警阈值（次/小时）
+# 每小时离线次数超过此值时输出告警
+# 推荐值：3-5次
+OFFLINE_ALERT_THRESHOLD="3"
+
+# 连续认证失败告警阈值（次）
+# 连续认证失败次数超过此值时输出告警
+# 推荐值：3-5次
+AUTH_FAIL_THRESHOLD="3"
+
+# 状态持久化文件路径
+# 存储运行统计、离线事件、认证记录等
+STATE_FILE="/usr/local/autologin/runtime.state"
 
 # ==================== 配置示例 ====================
 
-# 示例 1: 宿舍网络（稳定）
+# 示例 1: 标准配置（推荐）
 # WAN_INTERFACE="eth1"
-# CHECK_INTERVAL="60000"     # 60秒检测一次
-# LOG_TYPE="1"               # 文件日志
-# LOG_SIZE_MB="5"            # 小日志文件
+# DNS_CHECK_INTERVAL="10"
+# AUTH_HTTP_CHECK_INTERVAL="60"
+# DNS_TEST_SERVERS="119.29.29.29 223.5.5.5 1.1.1.1"
+# LOG_TYPE="1"
+# REALTIME_LOG_SIZE_MB="2"
+# LOG_SIZE_MB="10"
+# STAT_INTERVAL="3600"
 
-# 示例 2: 移动热点（不稳定）
+# 示例 2: 不稳定网络（快速响应）
 # WAN_INTERFACE="wlan0"
-# CHECK_INTERVAL="10000"     # 10秒检测一次
-# LOG_TYPE="2"               # syslog，便于远程查看
-# ISP_CHOICE="2"             # 移动运营商
+# DNS_CHECK_INTERVAL="5"           # 更频繁检测
+# AUTH_HTTP_CHECK_INTERVAL="60"
+# RECONNECT_INTERVAL="2"           # 更快重连
+# DNS_FAILURE_THRESHOLD="1"        # 更敏感判定
+# OFFLINE_ALERT_THRESHOLD="5"      # 提高告警阈值
+# LOG_TYPE="1"
 
-# 示例 3: 性能优先（低开销）
+# 示例 3: 稳定网络（低开销）
 # WAN_INTERFACE="eth1"
-# CHECK_INTERVAL="60000"     # 60秒检测一次
-# LOG_TYPE="3"               # 禁用日志
+# DNS_CHECK_INTERVAL="30"          # 降低检测频率
+# AUTH_HTTP_CHECK_INTERVAL="120"
+# DNS_FAILURE_THRESHOLD="999"      # 所有DNS失败才判定离线
+# LOG_TYPE="1"
+# STAT_INTERVAL="7200"             # 2小时输出一次统计
+
+# 示例 4: 调试模式（最大日志详情）
+# WAN_INTERFACE="eth1"
+# LOG_TYPE="2"                     # 使用syslog实时查看
+# DNS_CHECK_INTERVAL="10"
+# STAT_INTERVAL="1800"             # 30分钟输出一次统计
+# OFFLINE_ALERT_THRESHOLD="1"      # 每次离线都告警
+# AUTH_FAIL_THRESHOLD="1"          # 每次认证失败都告警
+
+# 示例 5: 性能优先（最小开销）
+# WAN_INTERFACE="eth1"
+# DNS_CHECK_INTERVAL="60"          # 最低频率检测
+# AUTH_HTTP_CHECK_INTERVAL="120"
+# LOG_TYPE="3"                     # 禁用日志
+# ENABLE_AUTH_HTTP="N"             # 仅依赖DNS检测
+
+# ==================== 新特性说明 (v1.2.0b+) ====================
+
+# 🎯 双层日志架构：
+#   • 实时日志：存储在内存中（/tmp），快速写入，包含所有日志
+#   • 持久化日志：存储在闪存中，重启后保留，仅保留故障事件
+#   • 日志级别：INFO, CHECK, OFFLINE, AUTH, ONLINE, ERROR, WARN, STAT
+
+# 📊 完整运行统计：
+#   • 总运行时长、本次在线时长
+#   • 历史离线次数、上次离线时间/原因
+#   • 认证统计、DNS失败统计
+#   • 自动生成状态摘要（可配置间隔）
+
+# 🎯 4状态自适应检测：
+#   • ONLINE：低频轮询检测（节省资源）
+#   • SUSPECT：并行快速验证（减少误判）
+#   • OFFLINE：快速恢复模式（立即登录）
+#   • RECOVERING：稳定性验证（防止频繁切换）
+
+# ⚠️ 智能告警机制：
+#   • 每小时离线次数超限告警
+#   • 连续认证失败告警
+#   • 告警阈值可配置
 
 # ==================== 注意事项 ====================
 
@@ -76,13 +192,65 @@ LOG_SIZE_MB="10"
 # 2. 密码中如果包含特殊字符，请确保正确转义
 #    例如：USER_PASSWORD="pass\"word"
 
-# 3. 检测频率不宜过高，建议不低于 10000 ms（10秒）
-#    过高频率会增加系统负载和网络请求
+# 3. DNS检测频率建议：
+#    - 稳定网络：20-30秒
+#    - 一般网络：10-20秒
+#    - 不稳定网络：5-10秒
+#    - 不建议低于5秒（增加系统负载）
 
-# 4. 日志大小建议根据存储空间调整：
-#    - 存储充足：10-20 MB
-#    - 存储紧张：5 MB 或使用 syslog
+# 4. HTTP检测频率限制：
+#    - 最小值：60秒
+#    - 原因：认证服务器有防护机制，高频请求会被强制登出
+#    - 建议值：60-120秒
 
-# 5. 如果需要调试，建议临时启用 syslog：
-#    LOG_TYPE="2"
-#    然后使用 logread -f | grep autologin 实时查看
+# 5. 日志大小建议：
+#    - 实时日志：2-5 MB（内存中，影响不大）
+#    - 持久化日志：5-20 MB（闪存中，根据存储空间调整）
+#    - 存储紧张时可使用 syslog（LOG_TYPE=2）
+
+# 6. 查看日志：
+#    # 实时日志（所有级别）
+#    tail -f /tmp/autologin/autologin.log
+#
+#    # 持久化故障日志
+#    tail -f /usr/local/autologin/logs/persistent.log
+#
+#    # 运行统计
+#    cat /usr/local/autologin/runtime.state
+#
+#    # syslog模式
+#    logread -f | grep autologin
+
+# 7. 过滤特定日志级别：
+#    grep '\[OFFLINE\]' /tmp/autologin/autologin.log   # 离线事件
+#    grep '\[AUTH\]' /tmp/autologin/autologin.log      # 认证记录
+#    grep '\[STAT\]' /tmp/autologin/autologin.log      # 状态摘要
+#    grep '\[WARN\]' /tmp/autologin/autologin.log      # 告警信息
+
+# 8. 性能优化建议：
+#    - 减少DNS检测频率（增加DNS_CHECK_INTERVAL）
+#    - 提高HTTP检测间隔（增加AUTH_HTTP_CHECK_INTERVAL）
+#    - 仅启用必要的检测方法
+#    - 适当调整告警阈值，减少不必要的告警
+
+# 9. v1.2.1b 更新说明：
+#    - 修复 persistent.log 未创建问题（故障日志立即写入）
+#    - 修复禁ping误判问题（DNS+HTTP双重验证）
+#    - 修复DNS统计硬编码（动态适配配置）
+#    - 改进时间显示格式（人类可读）
+
+# ==================== 配置兼容性 ====================
+
+# v1.2.0b+ 新增配置项（旧版本不适用）：
+#   DNS_CHECK_INTERVAL, AUTH_HTTP_CHECK_INTERVAL, RECONNECT_INTERVAL
+#   DNS_FAILURE_THRESHOLD, ONLINE_VERIFY_STRATEGY, DNS_TEST_SERVERS
+#   ENABLE_AUTH_HTTP, ENABLE_PUBLIC_PING
+#   REALTIME_LOG_FILE, PERSISTENT_LOG_FILE, REALTIME_LOG_SIZE_MB
+#   STAT_INTERVAL, OFFLINE_ALERT_THRESHOLD, AUTH_FAIL_THRESHOLD, STATE_FILE
+
+# v1.2.0b 之前的配置项（已废弃）：
+#   CHECK_INTERVAL（毫秒）- 替换为 DNS_CHECK_INTERVAL（秒）
+#   LOG_FILE - 替换为 REALTIME_LOG_FILE 和 PERSISTENT_LOG_FILE
+
+# 从旧版本升级：
+#   建议重新运行 install.sh，系统会自动迁移配置
