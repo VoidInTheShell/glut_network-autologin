@@ -220,23 +220,55 @@ interactive_config() {
     echo ""
     print_info "日志配置"
     echo "请选择日志输出方式:"
-    echo "  1) 输出到文件 (可限制大小)"
+    echo "  1) 输出到文件 (智能日志系统，故障分析优化)"
     echo "  2) 输出到 syslog (系统日志)"
     echo "  3) 输出到 /dev/null (不记录)"
     read -p "请输入选项 (1/2/3) [默认: 1]: " LOG_TYPE
     LOG_TYPE=${LOG_TYPE:-1}
 
     if [ "$LOG_TYPE" = "1" ]; then
-        read -p "请输入日志大小限制 (MB) [默认: 10]: " LOG_SIZE_MB
+        echo ""
+        print_info "智能日志系统配置"
+        echo "系统采用双层日志架构："
+        echo "  • 实时日志: /tmp/autologin/ (内存，快速写入)"
+        echo "  • 持久化日志: /usr/local/autologin/logs/persistent.log (仅保留故障事件)"
+        echo ""
+        read -p "持久化故障日志大小限制 (MB) [默认: 10]: " LOG_SIZE_MB
         LOG_SIZE_MB=${LOG_SIZE_MB:-10}
+        read -p "实时日志切割阈值 (MB) [默认: 2]: " REALTIME_LOG_SIZE_MB
+        REALTIME_LOG_SIZE_MB=${REALTIME_LOG_SIZE_MB:-2}
+
+        # 告警阈值配置
+        echo ""
+        print_info "故障告警阈值配置"
+        read -p "离线次数告警阈值 (次/小时) [默认: 3]: " OFFLINE_ALERT_THRESHOLD
+        OFFLINE_ALERT_THRESHOLD=${OFFLINE_ALERT_THRESHOLD:-3}
+        read -p "连续认证失败告警阈值 (次) [默认: 3]: " AUTH_FAIL_THRESHOLD
+        AUTH_FAIL_THRESHOLD=${AUTH_FAIL_THRESHOLD:-3}
+
+        # 状态摘要间隔
+        echo ""
+        read -p "状态摘要输出间隔 (秒) [默认: 3600 (1小时)]: " STAT_INTERVAL
+        STAT_INTERVAL=${STAT_INTERVAL:-3600}
+
         LOG_DIR="$INSTALL_DIR/logs"
-        LOG_FILE="$LOG_DIR/autologin.log"
+        PERSISTENT_LOG_FILE="$LOG_DIR/persistent.log"
+        REALTIME_LOG_DIR="/tmp/autologin"
+        REALTIME_LOG_FILE="$REALTIME_LOG_DIR/autologin.log"
     elif [ "$LOG_TYPE" = "2" ]; then
         LOG_FILE="logger -t autologin"
         LOG_SIZE_MB=0
+        REALTIME_LOG_SIZE_MB=0
+        OFFLINE_ALERT_THRESHOLD=3
+        AUTH_FAIL_THRESHOLD=3
+        STAT_INTERVAL=3600
     else
         LOG_FILE="/dev/null"
         LOG_SIZE_MB=0
+        REALTIME_LOG_SIZE_MB=0
+        OFFLINE_ALERT_THRESHOLD=3
+        AUTH_FAIL_THRESHOLD=3
+        STAT_INTERVAL=3600
     fi
 
     echo ""
@@ -270,10 +302,14 @@ interactive_config() {
     echo "  公网DNS服务器: $DNS_TEST_SERVERS"
     echo ""
     if [ "$LOG_TYPE" = "1" ]; then
-        echo "  日志文件: $LOG_FILE"
-        echo "  日志大小: $LOG_SIZE_MB MB"
+        echo "  日志系统: 智能双层架构"
+        echo "    实时日志: $REALTIME_LOG_FILE (切割阈值: ${REALTIME_LOG_SIZE_MB}MB)"
+        echo "    持久化日志: $PERSISTENT_LOG_FILE (最大: ${LOG_SIZE_MB}MB)"
+        echo "    状态摘要间隔: $((STAT_INTERVAL/60)) 分钟"
+        echo "    离线告警阈值: ${OFFLINE_ALERT_THRESHOLD} 次/小时"
+        echo "    认证失败告警阈值: ${AUTH_FAIL_THRESHOLD} 次"
     elif [ "$LOG_TYPE" = "2" ]; then
-        echo "  日志输出: syslog"
+        echo "  日志输出: syslog (结构化格式)"
     else
         echo "  日志输出: 禁用"
     fi
@@ -292,6 +328,9 @@ create_directories() {
     mkdir -p "$INSTALL_DIR"
     if [ "$LOG_TYPE" = "1" ]; then
         mkdir -p "$LOG_DIR"
+        mkdir -p "$REALTIME_LOG_DIR"
+        print_info "已创建持久化日志目录: $LOG_DIR"
+        print_info "已创建实时日志目录: $REALTIME_LOG_DIR"
     fi
 }
 
@@ -302,7 +341,7 @@ generate_login_script() {
     cat > "$SCRIPT_FILE" << 'EOFSCRIPT'
 #!/bin/sh
 #
-# 自动登录脚本 - 双层检测状态机版本
+# 自动登录脚本 - 智能日志系统增强版
 # 由安装程序自动生成
 #
 
@@ -311,15 +350,21 @@ CONFIG_FILE="/etc/config/autologin"
 
 # 全局状态变量
 CURRENT_STATE="UNKNOWN"  # ONLINE, SUSPECT, OFFLINE, RECOVERING, UNKNOWN
-START_TIME=0
+CURRENT_SESSION_START=0  # 当前会话开始时间
 LAST_DNS_CHECK=0
 LAST_HTTP_CHECK=0
-LAST_STATUS_LOG=0
 DNS_SERVER_INDEX=0
 DNS_CONSECUTIVE_FAILURES=0  # DNS连续失败计数器
 RECOVERING_SUCCESS_COUNT=0  # 恢复状态成功计数
 OFFLINE_DNS_CHECK_INTERVAL=5  # 离线状态下DNS检测间隔（秒）
 OFFLINE_HTTP_CHECK_INTERVAL=60  # 离线状态下HTTP检测间隔（秒）
+
+# 离线事件追踪（当前离线事件的临时变量）
+OFFLINE_START_TIME=0
+OFFLINE_DNS_FAIL_LIST=""
+OFFLINE_PARALLEL_FAIL_LIST=""
+OFFLINE_AUTH_RESPONSE=""
+AUTH_ATTEMPT_COUNT=0
 
 # ============ 命令兼容性检测 ============
 # 检查命令是否可用
@@ -365,6 +410,35 @@ get_timestamp() {
     date +%s
 }
 
+# 格式化时长显示（秒 -> 人类可读）
+format_duration() {
+    local seconds=$1
+    local days=$((seconds / 86400))
+    local hours=$(( (seconds % 86400) / 3600 ))
+    local mins=$(( (seconds % 3600) / 60 ))
+    local secs=$((seconds % 60))
+
+    if [ $days -gt 0 ]; then
+        echo "${days}天${hours}小时${mins}分钟"
+    elif [ $hours -gt 0 ]; then
+        echo "${hours}小时${mins}分钟"
+    elif [ $mins -gt 0 ]; then
+        echo "${mins}分钟${secs}秒"
+    else
+        echo "${secs}秒"
+    fi
+}
+
+# 格式化日期时间（时间戳 -> YY-MM-DD HH:MM）
+format_datetime() {
+    local timestamp=$1
+    if [ "$timestamp" -eq 0 ] || [ -z "$timestamp" ]; then
+        echo "未知"
+    else
+        date -d "@$timestamp" '+%Y-%m-%d %H:%M' 2>/dev/null || date -r "$timestamp" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "未知"
+    fi
+}
+
 # 读取配置
 load_config() {
     if [ -f "$CONFIG_FILE" ]; then
@@ -373,6 +447,126 @@ load_config() {
         echo "错误: 配置文件不存在"
         exit 1
     fi
+}
+
+# ============ 状态文件管理 ============
+
+# 初始化状态文件
+init_state_file() {
+    if [ ! -f "$STATE_FILE" ]; then
+        local now=$(get_timestamp)
+        cat > "$STATE_FILE" << EOF
+# 自动登录服务运行状态
+# 此文件由系统自动维护，请勿手动编辑
+
+# 服务运行统计
+FIRST_START_TIME=$now
+LAST_START_TIME=$now
+TOTAL_OFFLINE_SECONDS=0
+
+# 离线统计
+OFFLINE_COUNT=0
+CURRENT_EVENT_ID=0
+
+# 在线状态
+ONLINE_SINCE=0
+MAX_ONLINE_DURATION=0
+
+# 上次离线信息
+LAST_OFFLINE_TIME=0
+LAST_OFFLINE_DNS_FAIL=""
+LAST_OFFLINE_PARALLEL_FAIL=""
+LAST_OFFLINE_AUTH_RESPONSE=""
+LAST_RECOVERY_DURATION=0
+
+# 认证统计
+AUTH_TOTAL_COUNT=0
+AUTH_LAST_ATTEMPTS=0
+TOTAL_RECOVERY_TIME=0
+
+# DNS失败统计
+DNS_FAIL_119=0
+DNS_FAIL_223=0
+DNS_FAIL_8=0
+DNS_FAIL_1=0
+DNS_FAIL_114=0
+
+# 状态摘要
+LAST_STAT_TIME=$now
+
+# 告警统计
+LAST_HOUR_OFFLINE_COUNT=0
+LAST_HOUR_START_TIME=$now
+CONSECUTIVE_AUTH_FAILURES=0
+EOF
+    fi
+    # 更新最后启动时间
+    local now=$(get_timestamp)
+    update_state "LAST_START_TIME" "$now"
+}
+
+# 加载状态文件
+load_state() {
+    if [ -f "$STATE_FILE" ]; then
+        . "$STATE_FILE"
+    else
+        init_state_file
+        . "$STATE_FILE"
+    fi
+}
+
+# 更新状态字段
+update_state() {
+    local key="$1"
+    local value="$2"
+
+    if [ ! -f "$STATE_FILE" ]; then
+        init_state_file
+    fi
+
+    # 使用临时文件避免并发问题
+    local tmp_file="${STATE_FILE}.tmp"
+
+    # 如果字段存在则更新，否则追加
+    if grep -q "^${key}=" "$STATE_FILE" 2>/dev/null; then
+        grep -v "^${key}=" "$STATE_FILE" > "$tmp_file"
+        echo "${key}=${value}" >> "$tmp_file"
+        mv "$tmp_file" "$STATE_FILE"
+    else
+        echo "${key}=${value}" >> "$STATE_FILE"
+    fi
+}
+
+# 增加状态计数器
+increment_state() {
+    local key="$1"
+    local increment="${2:-1}"
+
+    # 加载当前值
+    load_state
+    local current_value=$(eval echo \$${key})
+
+    # 如果为空或非数字，初始化为0
+    case "$current_value" in
+        ''|*[!0-9]*) current_value=0 ;;
+    esac
+
+    # 增加并更新
+    local new_value=$((current_value + increment))
+    update_state "$key" "$new_value"
+}
+
+# 获取DNS服务器统计键名
+get_dns_stat_key() {
+    local dns_ip="$1"
+    case "$dns_ip" in
+        119.29.29.29) echo "DNS_FAIL_119" ;;
+        223.5.5.5) echo "DNS_FAIL_223" ;;
+        8.8.8.8) echo "DNS_FAIL_8" ;;
+        1.1.1.1) echo "DNS_FAIL_1" ;;
+        114.114.114.114) echo "DNS_FAIL_114" ;;
+        *) echo "DNS_FAIL_OTHER" ;;
+    esac
 }
 
 # 获取 WAN 口 IP 地址
@@ -410,48 +604,201 @@ get_wan_mac() {
     echo "$mac"
 }
 
-# 日志输出函数
-log_message() {
+# ============ 智能日志系统 ============
+
+# 带级别的日志输出函数
+# 级别: INFO, CHECK, OFFLINE, AUTH, ONLINE, ERROR, STAT, WARN
+log_with_level() {
+    local level="$1"
+    local message="$2"
     local timestamp=$(date +'%Y-%m-%d %H:%M:%S')
-    local message="$1"
+    local log_line="[$timestamp] [$level] $message"
 
     if [ "$LOG_TYPE" = "1" ]; then
-        # 检查日志大小
-        if [ -f "$LOG_FILE" ]; then
-            local size=$(du -m "$LOG_FILE" | cut -f1)
-            if [ "$size" -ge "$LOG_SIZE_MB" ]; then
-                # 日志轮转
-                mv "$LOG_FILE" "$LOG_FILE.old"
-                echo "[$timestamp] 日志已轮转" > "$LOG_FILE"
-            fi
-        fi
-        echo "[$timestamp] $message" >> "$LOG_FILE"
+        # 文件日志模式：写入实时日志
+        echo "$log_line" >> "$REALTIME_LOG_FILE"
+
+        # 检查实时日志大小，触发切割
+        check_and_rotate_log
     elif [ "$LOG_TYPE" = "2" ]; then
-        logger -t autologin "$message"
+        # syslog模式
+        logger -t autologin "[$level] $message"
     fi
 }
 
-# 日志输出函数（带强制标记，用于重要事件）
+# 检查并切割实时日志
+check_and_rotate_log() {
+    if [ ! -f "$REALTIME_LOG_FILE" ]; then
+        return
+    fi
+
+    # 检查文件大小（MB）
+    local size=$(du -m "$REALTIME_LOG_FILE" 2>/dev/null | cut -f1)
+    if [ -z "$size" ]; then
+        size=0
+    fi
+
+    # 如果超过阈值，执行智能切割
+    if [ "$size" -ge "$REALTIME_LOG_SIZE_MB" ]; then
+        rotate_realtime_log
+    fi
+}
+
+# 智能切割实时日志
+rotate_realtime_log() {
+    log_with_level "INFO" "实时日志达到${REALTIME_LOG_SIZE_MB}MB，开始智能切割..."
+
+    # 提取故障事件和最后的状态摘要
+    local fault_log="/tmp/fault_events_$$.tmp"
+    extract_fault_events "$REALTIME_LOG_FILE" "$fault_log"
+
+    # 追加到持久化日志
+    if [ -f "$fault_log" ] && [ -s "$fault_log" ]; then
+        cat "$fault_log" >> "$PERSISTENT_LOG_FILE"
+        rm -f "$fault_log"
+    fi
+
+    # 清空实时日志并记录切割标记
+    local timestamp=$(date +'%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] [INFO] 日志已切割，故障事件已归档到持久化日志" > "$REALTIME_LOG_FILE"
+
+    # 检查持久化日志大小
+    trim_persistent_log
+}
+
+# 提取故障事件（从实时日志中提取OFFLINE、AUTH、ERROR、WARN、STAT级别）
+extract_fault_events() {
+    local source_log="$1"
+    local dest_log="$2"
+
+    if [ ! -f "$source_log" ]; then
+        return
+    fi
+
+    # 提取故障相关日志（OFFLINE、AUTH、ONLINE、ERROR、WARN）和最后的STAT
+    grep -E '\[(OFFLINE|AUTH|ONLINE|ERROR|WARN)\]' "$source_log" > "$dest_log" 2>/dev/null || true
+
+    # 添加最后一条STAT日志
+    grep '\[STAT\]' "$source_log" | tail -1 >> "$dest_log" 2>/dev/null || true
+}
+
+# 修剪持久化日志（按大小限制）
+trim_persistent_log() {
+    if [ ! -f "$PERSISTENT_LOG_FILE" ]; then
+        return
+    fi
+
+    local size=$(du -m "$PERSISTENT_LOG_FILE" 2>/dev/null | cut -f1)
+    if [ -z "$size" ]; then
+        size=0
+    fi
+
+    # 如果超过配置大小，删除最旧的故障事件
+    if [ "$size" -ge "$LOG_SIZE_MB" ]; then
+        local temp_log="/tmp/persistent_trim_$$.tmp"
+
+        # 保留后半部分日志和最后的STAT
+        local total_lines=$(wc -l < "$PERSISTENT_LOG_FILE")
+        local keep_lines=$((total_lines / 2))
+
+        tail -n "$keep_lines" "$PERSISTENT_LOG_FILE" > "$temp_log"
+        mv "$temp_log" "$PERSISTENT_LOG_FILE"
+
+        log_with_level "INFO" "持久化日志已修剪，删除了最旧的 $((total_lines - keep_lines)) 行"
+    fi
+}
+
+# 生成并输出状态摘要
+generate_stat_summary() {
+    load_state  # 重新加载最新状态
+
+    local now=$(get_timestamp)
+    local total_runtime=$((now - FIRST_START_TIME - TOTAL_OFFLINE_SECONDS))
+    local online_duration=0
+
+    if [ "$ONLINE_SINCE" -gt 0 ]; then
+        online_duration=$((now - ONLINE_SINCE))
+    fi
+
+    # 计算平均恢复时间
+    local avg_recovery="N/A"
+    if [ "$OFFLINE_COUNT" -gt 0 ] && [ "$TOTAL_RECOVERY_TIME" -gt 0 ]; then
+        avg_recovery=$(( TOTAL_RECOVERY_TIME / OFFLINE_COUNT ))
+        avg_recovery="${avg_recovery}秒"
+    fi
+
+    # 计算平均认证次数
+    local avg_auth="N/A"
+    if [ "$OFFLINE_COUNT" -gt 0 ] && [ "$AUTH_TOTAL_COUNT" -gt 0 ]; then
+        # 使用整数除法计算
+        local auth_times_10=$(( AUTH_TOTAL_COUNT * 10 / OFFLINE_COUNT ))
+        local auth_int=$((auth_times_10 / 10))
+        local auth_dec=$((auth_times_10 % 10))
+        avg_auth="${auth_int}.${auth_dec}次"
+    fi
+
+    # 输出状态摘要
+    log_with_level "STAT" "========== 状态摘要 =========="
+    log_with_level "STAT" "总运行时长: $(format_duration $total_runtime)"
+    log_with_level "STAT" "本次在线时长: $(format_duration $online_duration)"
+    log_with_level "STAT" "历史离线次数: ${OFFLINE_COUNT}次"
+    log_with_level "STAT" "上次离线时间: $(format_datetime $LAST_OFFLINE_TIME)"
+    log_with_level "STAT" "上次离线原因: DNS失败[$LAST_OFFLINE_DNS_FAIL] | 并行验证失败[$LAST_OFFLINE_PARALLEL_FAIL] | 认证响应[$LAST_OFFLINE_AUTH_RESPONSE]"
+    log_with_level "STAT" "上次恢复耗时: ${LAST_RECOVERY_DURATION}秒"
+    log_with_level "STAT" "总认证次数: ${AUTH_TOTAL_COUNT}次 (平均${avg_auth})"
+    log_with_level "STAT" "DNS失败统计: 119.29.29.29(${DNS_FAIL_119}次) 223.5.5.5(${DNS_FAIL_223}次) 8.8.8.8(${DNS_FAIL_8}次) 1.1.1.1(${DNS_FAIL_1}次)"
+    log_with_level "STAT" "最长在线时长: $(format_duration $MAX_ONLINE_DURATION)"
+    log_with_level "STAT" "平均恢复耗时: ${avg_recovery}"
+
+    # 检查告警
+    check_and_alert
+
+    log_with_level "STAT" "================================"
+
+    # 更新最后摘要时间
+    update_state "LAST_STAT_TIME" "$now"
+}
+
+# 检查并输出告警
+check_and_alert() {
+    load_state
+
+    local now=$(get_timestamp)
+
+    # 检查每小时离线次数
+    local hour_elapsed=$((now - LAST_HOUR_START_TIME))
+    if [ "$hour_elapsed" -ge 3600 ]; then
+        # 重置每小时计数器
+        update_state "LAST_HOUR_OFFLINE_COUNT" "0"
+        update_state "LAST_HOUR_START_TIME" "$now"
+    elif [ "$LAST_HOUR_OFFLINE_COUNT" -ge "$OFFLINE_ALERT_THRESHOLD" ]; then
+        log_with_level "WARN" "⚠️ 告警: 最近1小时离线次数(${LAST_HOUR_OFFLINE_COUNT})超过阈值(${OFFLINE_ALERT_THRESHOLD})"
+    fi
+
+    # 检查连续认证失败
+    if [ "$CONSECUTIVE_AUTH_FAILURES" -ge "$AUTH_FAIL_THRESHOLD" ]; then
+        log_with_level "WARN" "⚠️ 告警: 连续认证失败次数(${CONSECUTIVE_AUTH_FAILURES})超过阈值(${AUTH_FAIL_THRESHOLD})"
+    fi
+}
+
+# 定期输出状态摘要
+periodic_stat_summary() {
+    load_state
+    local now=$(get_timestamp)
+    local time_since_last=$((now - LAST_STAT_TIME))
+
+    if [ "$time_since_last" -ge "$STAT_INTERVAL" ]; then
+        generate_stat_summary
+    fi
+}
+
+# 兼容旧代码的日志函数
+log_message() {
+    log_with_level "INFO" "$1"
+}
+
 log_message_force() {
-    log_message "$1"
-}
-
-# 状态摘要日志（每10分钟记录一次）
-log_status_summary() {
-    local current_time=$(get_timestamp)
-    local time_since_last_log=$((current_time - LAST_STATUS_LOG))
-
-    # 在线状态下每10分钟记录一次，离线状态不记录摘要
-    if [ "$CURRENT_STATE" = "ONLINE" ] && [ $time_since_last_log -ge 600 ]; then
-        LAST_STATUS_LOG=$current_time
-        log_message "==== 状态摘要 ===="
-        log_message "当前状态: 在线 (ONLINE)"
-        log_message "运行时长: $((current_time - START_TIME)) 秒"
-        log_message "检测模式: 轮询（低频节能）"
-        log_message "  - DNS轮询索引: $DNS_SERVER_INDEX"
-        log_message "  - 连续失败计数: $DNS_CONSECUTIVE_FAILURES"
-        log_message "=================="
-    fi
+    log_with_level "INFO" "$1"
 }
 
 # 执行登录请求
@@ -459,19 +806,41 @@ do_login() {
     local current_ip=$(get_wan_ip)
     local mac_address=$(get_wan_mac)
 
+    # 增加认证尝试计数
+    AUTH_ATTEMPT_COUNT=$((AUTH_ATTEMPT_COUNT + 1))
+
     if [ -z "$current_ip" ]; then
-        log_message "错误: 无法获取 WAN 口 IP 地址 (接口: $WAN_INTERFACE)"
+        log_with_level "ERROR" "无法获取 WAN 口 IP 地址 (接口: $WAN_INTERFACE)"
+        OFFLINE_AUTH_RESPONSE="IP获取失败"
+        increment_state "CONSECUTIVE_AUTH_FAILURES"
         return 1
     fi
 
-    log_message "尝试登录 - IP: $current_ip, MAC: $mac_address"
+    log_with_level "AUTH" "尝试认证 (第${AUTH_ATTEMPT_COUNT}次) - IP: $current_ip"
 
     # 构建登录 URL
     local url="http://${AUTH_SERVER}:${AUTH_PORT_801}/eportal/portal/login?callback=dr1003&login_method=1&user_account=%2C0%2C${USER_ACCOUNT}&user_password=${USER_PASSWORD}&wlan_user_ip=${current_ip}&wlan_user_ipv6=&wlan_user_mac=000000000000&wlan_ac_ip=&wlan_ac_name=&page_index=pMnaGv1756888844&authex_enable=${ISP_CHOICE}&jsVersion=4.2.1&terminal_type=1&lang=zh-cn&lang=zh"
 
     # 执行登录请求
     local response=$(wget -qO- --timeout=5 "$url" 2>&1)
-    log_message "登录响应: $response"
+
+    # 解析响应（简化版，提取关键信息）
+    if echo "$response" | grep -q "success"; then
+        OFFLINE_AUTH_RESPONSE="success"
+        log_with_level "AUTH" "认证响应: 成功"
+        # 重置连续失败计数
+        update_state "CONSECUTIVE_AUTH_FAILURES" "0"
+    elif echo "$response" | grep -q "error"; then
+        OFFLINE_AUTH_RESPONSE="error"
+        log_with_level "AUTH" "认证响应: 失败"
+        increment_state "CONSECUTIVE_AUTH_FAILURES"
+    else
+        OFFLINE_AUTH_RESPONSE="unknown"
+        log_with_level "AUTH" "认证响应: $response"
+    fi
+
+    # 增加总认证计数
+    increment_state "AUTH_TOTAL_COUNT"
 
     return 0
 }
@@ -604,7 +973,7 @@ check_public_ping_parallel_with_log() {
 
     # 先ping认证服务器（确保本地网络正常）
     if ! ping -c 1 -W 1 "$AUTH_SERVER" >/dev/null 2>&1; then
-        log_message "并行DNS检测: 认证服务器 $AUTH_SERVER 不可达 (本地网络故障)"
+        log_with_level "OFFLINE" "认证服务器 $AUTH_SERVER 不可达 (本地网络故障)"
         return 1
     fi
 
@@ -621,20 +990,25 @@ check_public_ping_parallel_with_log() {
         else
             fail_count=$((fail_count + 1))
             fail_list="$fail_list $dns"
+            # 记录失败的DNS到全局变量（用于离线事件）
+            OFFLINE_PARALLEL_FAIL_LIST="${OFFLINE_PARALLEL_FAIL_LIST}${dns} "
+            # 增加DNS失败统计
+            local dns_key=$(get_dns_stat_key "$dns")
+            increment_state "$dns_key"
         fi
     done
 
     # 记录详细日志
-    log_message "并行DNS检测: 成功 $success_count/$dns_count, 失败 $fail_count/$dns_count"
-    [ -n "$success_list" ] && log_message "  可达:$success_list"
-    [ -n "$fail_list" ] && log_message "  不可达:$fail_list"
+    log_with_level "CHECK" "并行DNS检测: 成功 $success_count/$dns_count, 失败 $fail_count/$dns_count"
+    [ -n "$success_list" ] && log_with_level "CHECK" "  可达:$success_list"
+    [ -n "$fail_list" ] && log_with_level "CHECK" "  不可达:$fail_list"
 
     # 判断逻辑
     if [ $success_count -ge 1 ]; then
-        log_message "  判定: 在线 (至少1个DNS可达)"
+        log_with_level "ONLINE" "判定: 在线 (至少1个DNS可达)"
         return 0
     else
-        log_message "  判定: 离线 (所有DNS不可达)"
+        log_with_level "OFFLINE" "判定: 离线 (所有DNS不可达)"
         return 1
     fi
 }
@@ -775,8 +1149,8 @@ check_public_ping_with_log() {
 
 # 在线状态处理（ONLINE）- 低频轮询检测
 handle_online_state() {
-    # 定期记录状态摘要
-    log_status_summary
+    # 定期输出状态摘要
+    periodic_stat_summary
 
     local current_time=$(get_timestamp)
 
@@ -790,7 +1164,7 @@ handle_online_state() {
 
         if [ $dns_result -eq 1 ]; then
             # 单次失败，进入疑似离线状态快速验证
-            log_message_force "*** 状态变化: 在线 -> 疑似离线 (轮询检测失败，启动快速验证) ***"
+            log_with_level "OFFLINE" "*** 状态变化: 在线 -> 疑似离线 (轮询检测失败，启动快速验证) ***"
             CURRENT_STATE="SUSPECT"
             return
         fi
@@ -803,7 +1177,7 @@ handle_online_state() {
 
 # 疑似离线状态处理（SUSPECT）- 并行快速验证
 handle_suspect_state() {
-    log_message_force "疑似离线状态，立即启动并行快速验证..."
+    log_with_level "CHECK" "疑似离线状态，立即启动并行快速验证..."
 
     # 立即并行检测所有DNS（1秒超时）
     check_public_ping_parallel_with_log
@@ -811,19 +1185,19 @@ handle_suspect_state() {
 
     if [ $parallel_result -eq 0 ]; then
         # 并行检测通过，是误报，回到在线状态
-        log_message_force "*** 状态变化: 疑似离线 -> 在线 (快速验证通过，误报) ***"
+        log_with_level "ONLINE" "*** 状态变化: 疑似离线 -> 在线 (快速验证通过，误报) ***"
         DNS_CONSECUTIVE_FAILURES=0  # 重置计数器
         CURRENT_STATE="ONLINE"
         LAST_DNS_CHECK=$(get_timestamp)
         return
     elif [ $parallel_result -eq 1 ]; then
         # 并行检测确认离线
-        log_message_force "*** 状态变化: 疑似离线 -> 离线 (快速验证确认离线) ***"
+        log_with_level "OFFLINE" "*** 状态变化: 疑似离线 -> 离线 (快速验证确认离线) ***"
         CURRENT_STATE="OFFLINE"
         return
     else
         # 检测失败（不应该发生）
-        log_message "疑似离线验证失败，默认判定为离线"
+        log_with_level "ERROR" "疑似离线验证失败，默认判定为离线"
         CURRENT_STATE="OFFLINE"
         return
     fi
@@ -831,7 +1205,30 @@ handle_suspect_state() {
 
 # 离线状态处理（OFFLINE）- 快速登录恢复
 handle_offline_state() {
-    log_message_force "确认离线，立即尝试登录并进入快速恢复模式..."
+    # 初始化离线事件
+    OFFLINE_START_TIME=$(get_timestamp)
+    OFFLINE_DNS_FAIL_LIST=""
+    OFFLINE_PARALLEL_FAIL_LIST=""
+    OFFLINE_AUTH_RESPONSE=""
+    AUTH_ATTEMPT_COUNT=0
+
+    # 记录离线事件
+    increment_state "OFFLINE_COUNT"
+    increment_state "CURRENT_EVENT_ID"
+    increment_state "LAST_HOUR_OFFLINE_COUNT"
+    update_state "LAST_OFFLINE_TIME" "$OFFLINE_START_TIME"
+
+    # 记录在线时长
+    if [ "$ONLINE_SINCE" -gt 0 ]; then
+        local online_duration=$((OFFLINE_START_TIME - ONLINE_SINCE))
+        if [ "$online_duration" -gt "$MAX_ONLINE_DURATION" ]; then
+            update_state "MAX_ONLINE_DURATION" "$online_duration"
+        fi
+    fi
+
+    load_state  # 重新加载最新事件ID
+    log_with_level "OFFLINE" "========== 故障事件 #${CURRENT_EVENT_ID} =========="
+    log_with_level "OFFLINE" "检测到离线，立即尝试登录并进入快速恢复模式..."
 
     # 立即执行登录
     do_login
@@ -860,19 +1257,34 @@ handle_offline_state() {
 
             if [ $dns_result -eq 0 ]; then
                 # DNS恢复，立即检测HTTP
-                log_message "DNS检测恢复，立即验证HTTP状态..."
+                log_with_level "CHECK" "DNS检测恢复，立即验证HTTP状态..."
                 check_auth_http_with_log
                 local http_result=$?
 
                 if [ $http_result -eq 0 ]; then
-                    # DNS + HTTP双重验证通过，进入恢复状态
-                    log_message_force "*** 状态变化: 离线 -> 恢复中 (DNS + HTTP验证通过) ***"
+                    # DNS + HTTP双重验证通过，记录恢复时长
+                    local recovery_duration=$((current_time - OFFLINE_START_TIME))
+                    update_state "LAST_RECOVERY_DURATION" "$recovery_duration"
+                    increment_state "TOTAL_RECOVERY_TIME" "$recovery_duration"
+                    update_state "LAST_OFFLINE_DNS_FAIL" "$OFFLINE_DNS_FAIL_LIST"
+                    update_state "LAST_OFFLINE_PARALLEL_FAIL" "$OFFLINE_PARALLEL_FAIL_LIST"
+                    update_state "LAST_OFFLINE_AUTH_RESPONSE" "$OFFLINE_AUTH_RESPONSE"
+                    update_state "AUTH_LAST_ATTEMPTS" "$AUTH_ATTEMPT_COUNT"
+
+                    # 累计离线时间
+                    local offline_duration=$((current_time - OFFLINE_START_TIME))
+                    increment_state "TOTAL_OFFLINE_SECONDS" "$offline_duration"
+
+                    log_with_level "ONLINE" "*** 状态变化: 离线 -> 恢复中 (DNS + HTTP验证通过) ***"
+                    log_with_level "ONLINE" "恢复耗时: ${recovery_duration}秒 | 认证尝试: ${AUTH_ATTEMPT_COUNT}次"
+                    log_with_level "ONLINE" "=========================================="
+
                     CURRENT_STATE="RECOVERING"
                     RECOVERING_SUCCESS_COUNT=0
                     return
                 elif [ $http_result -eq 1 ]; then
                     # DNS在线但HTTP离线，需要继续登录
-                    log_message "DNS恢复但HTTP显示离线，需要继续认证"
+                    log_with_level "CHECK" "DNS恢复但HTTP显示离线，需要继续认证"
                     # 继续循环，下面会处理登录
                 fi
             fi
@@ -882,7 +1294,7 @@ handle_offline_state() {
         local time_since_login=$((current_time - last_login_attempt))
         if [ $time_since_login -ge $login_interval ]; then
             if [ $((offline_loop_count % 3)) -eq 0 ]; then
-                log_message "网络仍离线 (循环 #$offline_loop_count)，继续尝试登录..."
+                log_with_level "AUTH" "网络仍离线 (循环 #$offline_loop_count)，继续尝试登录..."
             fi
             do_login
             last_login_attempt=$current_time
@@ -892,7 +1304,7 @@ handle_offline_state() {
 
 # 恢复中状态处理（RECOVERING）- 持续验证稳定性
 handle_recovering_state() {
-    log_message_force "进入恢复验证阶段，持续监控稳定性..."
+    log_with_level "CHECK" "进入恢复验证阶段，持续监控稳定性..."
 
     local recovering_check_count=0
     local required_success=5  # 需要连续5次成功才确认稳定
@@ -913,10 +1325,10 @@ handle_recovering_state() {
         if [ $dns_result -eq 0 ] && [ $http_result -eq 0 ]; then
             # 本次检测成功
             RECOVERING_SUCCESS_COUNT=$((RECOVERING_SUCCESS_COUNT + 1))
-            log_message "恢复验证: $RECOVERING_SUCCESS_COUNT/$required_success 成功"
+            log_with_level "CHECK" "恢复验证: $RECOVERING_SUCCESS_COUNT/$required_success 成功"
         else
             # 验证失败，重新进入离线状态
-            log_message_force "*** 状态变化: 恢复中 -> 离线 (验证失败，网络不稳定) ***"
+            log_with_level "OFFLINE" "*** 状态变化: 恢复中 -> 离线 (验证失败，网络不稳定) ***"
             RECOVERING_SUCCESS_COUNT=0
             CURRENT_STATE="OFFLINE"
             return
@@ -924,17 +1336,24 @@ handle_recovering_state() {
     done
 
     # 连续验证成功，确认稳定在线
-    log_message_force "*** 状态变化: 恢复中 -> 在线 (连续${required_success}次验证成功，确认稳定) ***"
+    local now=$(get_timestamp)
+    update_state "ONLINE_SINCE" "$now"
+    CURRENT_SESSION_START=$now
+
+    log_with_level "ONLINE" "*** 状态变化: 恢复中 -> 在线 (连续${required_success}次验证成功，确认稳定) ***"
     CURRENT_STATE="ONLINE"
     DNS_CONSECUTIVE_FAILURES=0
-    LAST_DNS_CHECK=$(get_timestamp)
-    LAST_HTTP_CHECK=$(get_timestamp)
-    LAST_STATUS_LOG=$(get_timestamp)
+    LAST_DNS_CHECK=$now
+    LAST_HTTP_CHECK=$now
 }
 
 # 主循环
 main() {
     load_config
+
+    # 初始化状态文件
+    init_state_file
+    load_state
 
     # 验证关键命令是否可用
     if ! check_required_commands; then
@@ -943,35 +1362,35 @@ main() {
 
     # 验证配置参数
     if [ -z "$WAN_INTERFACE" ] || [ -z "$USER_ACCOUNT" ] || [ -z "$USER_PASSWORD" ]; then
-        log_message "错误: 配置文件缺少必要参数"
+        log_with_level "ERROR" "配置文件缺少必要参数"
         exit 1
     fi
 
     # 验证检测频率是否为有效数字
     case "$DNS_CHECK_INTERVAL" in
         ''|*[!0-9]*)
-            log_message "警告: DNS_CHECK_INTERVAL无效，使用默认值10秒"
+            log_with_level "WARN" "DNS_CHECK_INTERVAL无效，使用默认值10秒"
             DNS_CHECK_INTERVAL=10
             ;;
     esac
 
     case "$AUTH_HTTP_CHECK_INTERVAL" in
         ''|*[!0-9]*)
-            log_message "警告: AUTH_HTTP_CHECK_INTERVAL无效，使用默认值60秒"
+            log_with_level "WARN" "AUTH_HTTP_CHECK_INTERVAL无效，使用默认值60秒"
             AUTH_HTTP_CHECK_INTERVAL=60
             ;;
     esac
 
     case "$RECONNECT_INTERVAL" in
         ''|*[!0-9]*)
-            log_message "警告: RECONNECT_INTERVAL无效，使用默认值3秒"
+            log_with_level "WARN" "RECONNECT_INTERVAL无效，使用默认值3秒"
             RECONNECT_INTERVAL=3
             ;;
     esac
 
     case "$DNS_FAILURE_THRESHOLD" in
         ''|*[!0-9]*)
-            log_message "警告: DNS_FAILURE_THRESHOLD无效，使用默认值2"
+            log_with_level "WARN" "DNS_FAILURE_THRESHOLD无效，使用默认值2"
             DNS_FAILURE_THRESHOLD=2
             ;;
     esac
@@ -987,32 +1406,37 @@ main() {
         RECONNECT_INTERVAL=1
     fi
 
-    log_message "=== 自动登录服务启动 (4状态自适应检测) ==="
-    log_message "WAN 接口: $WAN_INTERFACE"
-    log_message ""
-    log_message "检测策略:"
-    log_message "  • ONLINE状态: 低频轮询检测（每${DNS_CHECK_INTERVAL}秒1个DNS）"
-    log_message "  • SUSPECT状态: 并行快速验证（1秒超时，所有DNS）"
-    log_message "  • OFFLINE状态: 快速恢复模式（每2秒并行检测）"
-    log_message "  • RECOVERING状态: 稳定性验证（连续5次成功确认）"
-    log_message ""
-    log_message "性能指标:"
-    log_message "  • 在线误判防护: 轮询单点失败→并行快速验证"
-    log_message "  • 离线发现时间: < 2秒（并行检测）"
-    log_message "  • 恢复时间: < 2秒（快速检测+立即登录）"
-    log_message "  • 状态稳定性: 连续5次验证防止频繁切换"
-    log_message ""
-    log_message "公网DNS服务器: $DNS_TEST_SERVERS"
+    log_with_level "INFO" "=== 自动登录服务启动 (智能日志增强版) ==="
+    log_with_level "INFO" "WAN 接口: $WAN_INTERFACE"
+    log_with_level "INFO" ""
+    log_with_level "INFO" "检测策略:"
+    log_with_level "INFO" "  • ONLINE状态: 低频轮询检测（每${DNS_CHECK_INTERVAL}秒1个DNS）"
+    log_with_level "INFO" "  • SUSPECT状态: 并行快速验证（1秒超时，所有DNS）"
+    log_with_level "INFO" "  • OFFLINE状态: 快速恢复模式（每2秒并行检测）"
+    log_with_level "INFO" "  • RECOVERING状态: 稳定性验证（连续5次成功确认）"
+    log_with_level "INFO" ""
+    log_with_level "INFO" "性能指标:"
+    log_with_level "INFO" "  • 在线误判防护: 轮询单点失败→并行快速验证"
+    log_with_level "INFO" "  • 离线发现时间: < 2秒（并行检测）"
+    log_with_level "INFO" "  • 恢复时间: < 2秒（快速检测+立即登录）"
+    log_with_level "INFO" "  • 状态稳定性: 连续5次验证防止频繁切换"
+    log_with_level "INFO" ""
+    log_with_level "INFO" "日志系统:"
+    log_with_level "INFO" "  • 实时日志: $REALTIME_LOG_FILE"
+    log_with_level "INFO" "  • 持久化日志: $PERSISTENT_LOG_FILE"
+    log_with_level "INFO" "  • 状态文件: $STATE_FILE"
+    log_with_level "INFO" "  • 状态摘要间隔: $((STAT_INTERVAL/60))分钟"
+    log_with_level "INFO" ""
+    log_with_level "INFO" "公网DNS服务器: $DNS_TEST_SERVERS"
 
     # 初始化时间戳
-    START_TIME=$(get_timestamp)
+    CURRENT_SESSION_START=$(get_timestamp)
     LAST_DNS_CHECK=0
     LAST_HTTP_CHECK=0
-    LAST_STATUS_LOG=$START_TIME
 
     # 初始化状态为UNKNOWN，进行首次检测
     CURRENT_STATE="UNKNOWN"
-    log_message "执行初始状态检测（并行快速检测）..."
+    log_with_level "INFO" "执行初始状态检测（并行快速检测）..."
 
     # 使用并行检测快速判定初始状态
     check_public_ping_parallel_with_log
@@ -1024,14 +1448,15 @@ main() {
         local initial_http=$?
 
         if [ $initial_http -eq 0 ]; then
-            log_message "初始状态: 在线 (DNS + HTTP双重验证通过)"
+            log_with_level "ONLINE" "初始状态: 在线 (DNS + HTTP双重验证通过)"
             CURRENT_STATE="ONLINE"
+            update_state "ONLINE_SINCE" "$(get_timestamp)"
         else
-            log_message "初始状态: 离线 (DNS通过但HTTP验证失败)"
+            log_with_level "OFFLINE" "初始状态: 离线 (DNS通过但HTTP验证失败)"
             CURRENT_STATE="OFFLINE"
         fi
     else
-        log_message "初始状态: 离线 (DNS检测失败)"
+        log_with_level "OFFLINE" "初始状态: 离线 (DNS检测失败)"
         CURRENT_STATE="OFFLINE"
     fi
 
@@ -1051,7 +1476,7 @@ main() {
                 handle_recovering_state
                 ;;
             *)
-                log_message "错误: 未知状态 $CURRENT_STATE，重置为OFFLINE"
+                log_with_level "ERROR" "未知状态 $CURRENT_STATE，重置为OFFLINE"
                 CURRENT_STATE="OFFLINE"
                 ;;
         esac
@@ -1108,8 +1533,18 @@ DNS_TEST_SERVERS="$DNS_TEST_SERVERS"
 
 # 日志配置
 LOG_TYPE="$LOG_TYPE"
-LOG_FILE="$LOG_FILE"
 LOG_SIZE_MB="$LOG_SIZE_MB"
+
+# 日志系统配置 (LOG_TYPE=1 文件模式专用)
+REALTIME_LOG_FILE="$REALTIME_LOG_FILE"
+PERSISTENT_LOG_FILE="$PERSISTENT_LOG_FILE"
+REALTIME_LOG_SIZE_MB="$REALTIME_LOG_SIZE_MB"
+STAT_INTERVAL="$STAT_INTERVAL"
+OFFLINE_ALERT_THRESHOLD="$OFFLINE_ALERT_THRESHOLD"
+AUTH_FAIL_THRESHOLD="$AUTH_FAIL_THRESHOLD"
+
+# 状态文件路径
+STATE_FILE="/usr/local/autologin/runtime.state"
 EOF
 
     chmod 600 "$CONFIG_FILE"
@@ -1192,10 +1627,14 @@ show_usage() {
     echo "  登录脚本: $SCRIPT_FILE"
     echo ""
     if [ "$LOG_TYPE" = "1" ]; then
-        echo "日志文件:"
-        echo "  日志目录: $LOG_DIR"
-        echo "  日志文件: $LOG_FILE"
-        echo "  查看日志: tail -f $LOG_FILE"
+        echo "日志系统 (智能双层架构):"
+        echo "  实时日志: $REALTIME_LOG_FILE"
+        echo "  持久化故障日志: $PERSISTENT_LOG_FILE"
+        echo "  状态文件: /usr/local/autologin/runtime.state"
+        echo ""
+        echo "  查看实时日志: tail -f $REALTIME_LOG_FILE"
+        echo "  查看故障日志: tail -f $PERSISTENT_LOG_FILE"
+        echo "  查看运行统计: cat /usr/local/autologin/runtime.state"
     elif [ "$LOG_TYPE" = "2" ]; then
         echo "日志查看:"
         echo "  实时日志: logread -f | grep autologin"
@@ -1214,6 +1653,33 @@ main() {
     print_info "========================================"
     print_info "  OpenWrt 自动登录服务安装程序"
     print_info "========================================"
+    echo ""
+
+    # 显示版本更新信息
+    echo -e "${GREEN}📦 v1.2.0b 新版本特性 (智能日志增强版)${NC}"
+    echo ""
+    echo "✨ 双层日志架构："
+    echo "   • 实时日志: /tmp/autologin/ (内存，快速)"
+    echo "   • 故障日志: /usr/local/autologin/logs/persistent.log (持久化)"
+    echo ""
+    echo "📊 完整运行统计："
+    echo "   • 总运行时长、本次在线时长"
+    echo "   • 历史离线次数、上次离线时间/原因"
+    echo "   • 认证统计、DNS失败统计"
+    echo "   • 自动生成状态摘要 (默认每小时)"
+    echo ""
+    echo "🎯 智能日志分级："
+    echo "   • 故障事件自动编号追踪"
+    echo "   • 日志切割时自动过滤心跳，仅保留故障"
+    echo "   • 结构化日志格式 (INFO/CHECK/OFFLINE/AUTH/ONLINE/ERROR/WARN/STAT)"
+    echo ""
+    echo "⚠️  告警机制："
+    echo "   • 每小时离线次数超限告警"
+    echo "   • 连续认证失败告警"
+    echo ""
+    echo -e "${YELLOW}💡 提示: 如从旧版本升级，建议先运行 uninstall.sh 卸载${NC}"
+    echo ""
+    read -p "按回车键继续安装..."
     echo ""
 
     check_system

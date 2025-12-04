@@ -41,6 +41,27 @@ print_header() {
     echo "  OpenWrt 自动登录服务卸载程序"
     echo "========================================${NC}"
     echo ""
+
+    # 显示卸载内容说明
+    echo -e "${YELLOW}🗑️  本次卸载将清理以下内容：${NC}"
+    echo ""
+    echo "  📁 标准文件："
+    echo "     • 服务脚本: /etc/init.d/autologin"
+    echo "     • 配置文件: /etc/config/autologin"
+    echo "     • 安装目录: /usr/local/autologin/"
+    echo ""
+    echo "  📊 智能日志系统 (新版)："
+    echo "     • 实时日志: /tmp/autologin/"
+    echo "     • 持久化日志: /usr/local/autologin/logs/persistent.log"
+    echo "     • 运行状态: /usr/local/autologin/runtime.state"
+    echo ""
+    echo "  🧹 临时文件："
+    echo "     • HTTP检测临时文件"
+    echo "     • 日志切割临时文件"
+    echo "     • 备份文件"
+    echo ""
+    echo -e "${GREEN}💡 提示: 支持可选配置备份，建议备份后再卸载${NC}"
+    echo ""
 }
 
 # 检测安装状态
@@ -264,10 +285,17 @@ remove_files() {
         removed=1
     fi
 
-    # 删除安装目录
+    # 删除安装目录（包括持久化日志和runtime.state）
     if [ -d "$INSTALL_DIR" ]; then
         rm -rf "$INSTALL_DIR"
-        print_info "已删除: $INSTALL_DIR"
+        print_info "已删除: $INSTALL_DIR (包括持久化日志和runtime.state)"
+        removed=1
+    fi
+
+    # 删除实时日志目录（/tmp/autologin）
+    if [ -d "/tmp/autologin" ]; then
+        rm -rf "/tmp/autologin"
+        print_info "已删除: /tmp/autologin (实时日志)"
         removed=1
     fi
 
@@ -316,12 +344,48 @@ cleanup_residuals() {
         cleaned=1
     fi
 
-    # 清理可能的日志文件备份
-    if [ -f "/usr/local/autologin/logs/autologin.log.old" ]; then
-        # 注意：这个文件会随着安装目录一起删除，这里是双重保险
-        print_info "清理日志备份文件..."
-        rm -f "/usr/local/autologin/logs/autologin.log.old" 2>/dev/null || true
+    # 清理智能日志系统产生的临时文件
+    local fault_temp_files=$(find /tmp -maxdepth 1 -name "fault_events_*" 2>/dev/null || true)
+    if [ -n "$fault_temp_files" ]; then
+        print_info "清理故障事件临时文件..."
+        echo "$fault_temp_files" | while read -r file; do
+            rm -f "$file" 2>/dev/null || true
+        done
         cleaned=1
+    fi
+
+    local persistent_temp_files=$(find /tmp -maxdepth 1 -name "persistent_trim_*" 2>/dev/null || true)
+    if [ -n "$persistent_temp_files" ]; then
+        print_info "清理持久化日志临时文件..."
+        echo "$persistent_temp_files" | while read -r file; do
+            rm -f "$file" 2>/dev/null || true
+        done
+        cleaned=1
+    fi
+
+    # 检测并清理不兼容的旧版本日志
+    print_info "检测不兼容的旧版本日志..."
+    local old_log_found=0
+
+    # 检查旧版本的日志文件（没有智能日志系统的版本）
+    if [ -f "/usr/local/autologin/logs/autologin.log.old" ]; then
+        print_warn "发现旧版本日志备份: /usr/local/autologin/logs/autologin.log.old"
+        rm -f "/usr/local/autologin/logs/autologin.log.old" 2>/dev/null || true
+        old_log_found=1
+        cleaned=1
+    fi
+
+    if [ -f "/usr/local/autologin/logs/autologin.log" ]; then
+        # 检查是否为旧版本日志（没有[LEVEL]标记）
+        if ! grep -q '\[OFFLINE\]\|\[AUTH\]\|\[STAT\]' "/usr/local/autologin/logs/autologin.log" 2>/dev/null; then
+            print_warn "发现不兼容的旧版本日志格式: /usr/local/autologin/logs/autologin.log"
+            old_log_found=1
+        fi
+    fi
+
+    if [ $old_log_found -eq 1 ]; then
+        print_info "旧版本日志文件已清理或将随安装目录一起删除"
+        print_info "新版本使用智能双层日志架构，不兼容旧日志格式"
     fi
 
     if [ $cleaned -eq 0 ]; then
@@ -362,6 +426,14 @@ verify_uninstall() {
         status="${status}  ${GREEN}✓ 安装目录已删除${NC}\n"
     fi
 
+    # 检查实时日志目录
+    if [ -d "/tmp/autologin" ]; then
+        status="${status}  ${RED}✗ 实时日志目录仍存在${NC}\n"
+        failed=1
+    else
+        status="${status}  ${GREEN}✓ 实时日志目录已删除${NC}\n"
+    fi
+
     # 检查进程
     if pgrep -f "/usr/local/autologin" >/dev/null 2>&1; then
         status="${status}  ${RED}✗ 进程仍在运行${NC}\n"
@@ -380,7 +452,7 @@ verify_uninstall() {
     fi
 
     # 检查临时文件残留
-    local temp_count=$(find /tmp -maxdepth 1 -name "auth_http_check.*" 2>/dev/null | wc -l)
+    local temp_count=$(find /tmp -maxdepth 1 \( -name "auth_http_check.*" -o -name "fault_events_*" -o -name "persistent_trim_*" \) 2>/dev/null | wc -l)
     if [ "$temp_count" -gt 0 ]; then
         status="${status}  ${YELLOW}⚠ 发现 $temp_count 个临时文件残留${NC}\n"
         # 临时文件残留不算严重失败，只是警告

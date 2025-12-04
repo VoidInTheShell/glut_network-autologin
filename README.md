@@ -13,7 +13,11 @@
 - ✅ 自动获取 WAN 口本地 DHCP IP（无需手动指定接口）
 - ✅ 交互式配置（账号、密码、检测频率、日志选项）
 - ✅ 灵活的日志管理（文件日志、syslog、禁用）
-- ✅ 日志大小限制和自动轮转
+- ✅ 智能双层日志系统（实时+持久化故障日志）**[v1.2.0b]**
+- ✅ 完整运行统计和故障追踪（离线次数、恢复时间、DNS失败统计）**[v1.2.0b]**
+- ✅ 结构化日志分级（INFO/CHECK/OFFLINE/AUTH/ONLINE/ERROR/WARN/STAT）**[v1.2.0b]**
+- ✅ 自动告警机制（离线频率、认证失败）**[v1.2.0b]**
+- ✅ 日志大小限制和智能轮转（自动过滤心跳日志）
 - ✅ 自动配置为 OpenWrt 系统服务
 - ✅ 支持开机自启动
 - ✅ 网络断线自动重连
@@ -105,19 +109,41 @@ sh /tmp/install.sh
 - 默认: 119.29.29.29 223.5.5.5 1.1.1.1
 - 用于辅助验证网络连通性（负载均衡轮询）
 
-#### 3.5 日志配置
+#### 3.5 日志配置 **[v1.2.0b ]**
 选择日志输出方式：
 
-**选项 1: 输出到文件**
-- 日志文件路径：`/usr/local/autologin/logs/autologin.log`
-- 可设置日志大小限制（默认 10 MB）
-- 超过限制自动轮转（保留 .old 文件）
-- 查看日志：`tail -f /usr/local/autologin/logs/autologin.log`
+**选项 1: 智能双层日志系统**（推荐）
+系统采用双层日志架构，兼顾实时分析和故障追踪：
+
+- **实时日志**: `/tmp/autologin/autologin.log` (内存中，快速写入)
+  - 记录所有级别日志（INFO/CHECK/OFFLINE/AUTH/ONLINE/ERROR/WARN/STAT）
+  - 切割阈值：2MB（默认）
+  - 查看：`tail -f /tmp/autologin/autologin.log`
+
+- **持久化故障日志**: `/usr/local/autologin/logs/persistent.log` (闪存中，永久保存)
+  - 仅保留故障事件（OFFLINE/AUTH/ONLINE/ERROR/WARN）和状态摘要（STAT）
+  - 实时日志切割时自动过滤心跳日志（INFO/CHECK），提取故障事件归档
+  - 大小限制：10MB（默认）
+  - 查看：`tail -f /usr/local/autologin/logs/persistent.log`
+
+- **运行统计**: `/usr/local/autologin/runtime.state`
+  - 总运行时长、历史离线次数、认证统计
+  - DNS失败统计（按服务器分类）
+  - 上次离线时间/原因、恢复耗时
+  - 查看：`cat /usr/local/autologin/runtime.state`
+
+配置参数：
+- 持久化故障日志大小限制（默认：10 MB）
+- 实时日志切割阈值（默认：2 MB）
+- 状态摘要输出间隔（默认：3600秒 = 1小时）
+- 离线次数告警阈值（默认：3次/小时）
+- 连续认证失败告警阈值（默认：3次）
 
 **选项 2: 输出到 syslog**
-- 日志输出到系统日志
+- 日志输出到系统日志（结构化格式）
 - 实时查看：`logread -f | grep autologin`
 - 历史日志：`logread | grep autologin`
+- 按级别过滤：`logread | grep autologin | grep OFFLINE`
 
 **选项 3: 不记录日志**
 - 所有日志输出到 /dev/null
@@ -185,7 +211,6 @@ ONLINE_VERIFY_STRATEGY="2"        # 在线判定策略 (1=仅DNS, 2=DNS+HTTP)
 
 # 检测方法开关
 ENABLE_AUTH_HTTP="Y"              # 启用本地认证服务器HTTP检测
-ENABLE_PUBLIC_HTTP="N"            # 启用公网HTTP检测 (已废弃)
 ENABLE_PUBLIC_PING="Y"            # 启用公网DNS Ping检测
 
 # 公网测试服务器配置
@@ -203,27 +228,45 @@ LOG_SIZE_MB="10"                  # 日志大小限制 (MB)
 /etc/init.d/autologin restart
 ```
 
-### 查看日志
+### 查看日志 **[v1.2.0b ]**
 
-**文件日志模式**：
+**智能双层日志系统**（LOG_TYPE=1）：
+
 ```sh
-# 实时查看
-tail -f /usr/local/autologin/logs/autologin.log
+# 查看实时日志（所有级别）
+tail -f /tmp/autologin/autologin.log
 
-# 查看最近 50 行
-tail -n 50 /usr/local/autologin/logs/autologin.log
+# 查看持久化故障日志（仅故障事件）
+tail -f /usr/local/autologin/logs/persistent.log
 
-# 查看所有日志
-cat /usr/local/autologin/logs/autologin.log
+# 按日志级别过滤
+tail -f /tmp/autologin/autologin.log | grep "\[OFFLINE\]"  # 离线事件
+tail -f /tmp/autologin/autologin.log | grep "\[AUTH\]"     # 认证请求
+tail -f /tmp/autologin/autologin.log | grep "\[STAT\]"     # 状态摘要
+tail -f /tmp/autologin/autologin.log | grep "\[ERROR\]"    # 错误日志
+tail -f /tmp/autologin/autologin.log | grep "\[WARN\]"     # 告警日志
+
+# 查看最近的故障事件
+grep "\[OFFLINE\]" /usr/local/autologin/logs/persistent.log | tail -20
+
+# 查看运行统计
+cat /usr/local/autologin/runtime.state
+
+# 查看状态摘要（每小时自动生成）
+grep "\[STAT\]" /tmp/autologin/autologin.log | tail -1
 ```
 
-**syslog 模式**：
+**syslog 模式**（LOG_TYPE=2）：
 ```sh
 # 实时查看
 logread -f | grep autologin
 
 # 查看历史
 logread | grep autologin
+
+# 按级别过滤
+logread | grep autologin | grep "\[OFFLINE\]"
+logread | grep autologin | grep "\[STAT\]"
 ```
 
 ## 工作原理
@@ -307,7 +350,7 @@ logread | grep autologin
 - 开机自动启动
 - 优雅的服务管理
 
-## 文件结构
+## 文件结构 **[v1.2.0b 更新]**
 
 安装完成后的文件分布：
 
@@ -320,9 +363,12 @@ logread | grep autologin
 
 /usr/local/autologin/
 ├── login.sh                   # 登录主脚本
-└── logs/                      # 日志目录（如果启用文件日志）
-    ├── autologin.log          # 当前日志
-    └── autologin.log.old      # 轮转后的旧日志
+├── runtime.state              # 运行统计（v1.2.0b+）
+└── logs/                      # 持久化日志目录
+    └── persistent.log         # 故障日志（v1.2.0b+）
+
+/tmp/autologin/                # 实时日志目录（v1.2.0b+，内存中）
+└── autologin.log              # 实时日志
 ```
 
 ## 常见问题
@@ -471,7 +517,7 @@ DNS_TEST_SERVERS="119.29.29.29 223.5.5.5 1.1.1.1 114.114.114.114"
 **查看检测日志**:
 ```sh
 # 文件日志模式
-tail -f /usr/local/autologin/logs/autologin.log | grep "检测"
+tail -f /tmp/autologin/autologin.log | grep "检测"
 
 # syslog模式
 logread -f | grep autologin | grep "检测"
@@ -495,10 +541,92 @@ wget --timeout=2 --tries=1 -qO- http://10.10.11.11/
 ps | grep login.sh
 
 # 查看最近日志
-tail -n 50 /usr/local/autologin/logs/autologin.log
+tail -n 50 /tmp/autologin/autologin.log
 
 # 实时监控状态变化
-tail -f /usr/local/autologin/logs/autologin.log | grep "状态变化"
+tail -f /tmp/autologin/autologin.log | grep "状态变化"
+```
+
+### Q8: 如何查看运行统计和故障历史？ **[v1.2.0b]**
+
+**查看完整运行统计**:
+```sh
+# 查看状态文件
+cat /usr/local/autologin/runtime.state
+
+# 主要统计指标：
+# - FIRST_START_TIME: 首次启动时间
+# - OFFLINE_COUNT: 历史离线次数
+# - LAST_OFFLINE_TIME: 上次离线时间（时间戳）
+# - LAST_RECOVERY_DURATION: 上次恢复耗时（秒）
+# - AUTH_TOTAL_COUNT: 总认证次数
+# - DNS_FAIL_119/223/8/1: 各DNS服务器失败统计
+# - MAX_ONLINE_DURATION: 最长在线时长（秒）
+```
+
+**查看最新状态摘要**:
+```sh
+# 查看最后一次状态摘要（每小时生成）
+grep "\[STAT\]" /tmp/autologin/autologin.log | tail -20
+
+# 输出示例：
+# [2025-12-04 10:00:00] [STAT] ========== 状态摘要 ==========
+# [2025-12-04 10:00:00] [STAT] 总运行时长: 2天5小时30分钟
+# [2025-12-04 10:00:00] [STAT] 本次在线时长: 3小时25分钟
+# [2025-12-04 10:00:00] [STAT] 历史离线次数: 5次
+# [2025-12-04 10:00:00] [STAT] 上次离线时间: 2025-12-04 06:35
+```
+
+**查看故障事件历史**:
+```sh
+# 查看持久化故障日志中的所有离线事件
+grep "========== 故障事件" /usr/local/autologin/logs/persistent.log
+
+# 查看最近5次离线事件的详细信息
+grep -A 10 "========== 故障事件" /usr/local/autologin/logs/persistent.log | tail -55
+```
+
+### Q9: 如何过滤和分析日志？ **[v1.2.0b]**
+
+**按日志级别过滤**:
+```sh
+# 仅查看离线事件
+tail -f /tmp/autologin/autologin.log | grep "\[OFFLINE\]"
+
+# 仅查看认证请求
+tail -f /tmp/autologin/autologin.log | grep "\[AUTH\]"
+
+# 仅查看错误和告警
+tail -f /tmp/autologin/autologin.log | grep -E "\[ERROR\]|\[WARN\]"
+
+# 查看状态摘要
+tail -f /tmp/autologin/autologin.log | grep "\[STAT\]"
+```
+
+**分析故障原因**:
+```sh
+# 查看某次故障事件的完整信息
+grep -A 20 "故障事件 #5" /usr/local/autologin/logs/persistent.log
+
+# 统计DNS失败分布
+grep "DNS失败统计" /tmp/autologin/autologin.log | tail -1
+
+# 查看告警
+grep "\[WARN\]" /tmp/autologin/autologin.log
+
+# 示例输出：
+# [WARN] ⚠️ 告警: 最近1小时离线次数(5)超过阈值(3)
+# [WARN] ⚠️ 告警: 连续认证失败次数(4)超过阈值(3)
+```
+
+**导出故障报告**:
+```sh
+# 导出最近的所有故障事件
+grep -E "\[OFFLINE\]|\[AUTH\]|\[ERROR\]|\[WARN\]|\[STAT\]" \
+  /tmp/autologin/autologin.log > /tmp/fault_report.log
+
+# 导出持久化故障日志
+cp /usr/local/autologin/logs/persistent.log /tmp/persistent_backup.log
 ```
 
 ## 高级配置
@@ -540,7 +668,7 @@ ONLINE_VERIFY_STRATEGY="2"
 vi /etc/config/autologin
 
 # 国内DNS服务器 (推荐)
-DNS_TEST_SERVERS="119.29.29.29 223.5.5.5 114.114.114.114"
+DNS_TEST_SERVERS="119.29.29.29 223.5.5.5 202.38.64.1 1.1.1.1"
 
 # 国内 + 国际DNS服务器
 DNS_TEST_SERVERS="119.29.29.29 223.5.5.5 1.1.1.1 8.8.8.8"
@@ -573,28 +701,4 @@ DNS_FAILURE_THRESHOLD="1"
 
 # 3. 使用多个DNS服务器并行检测
 DNS_TEST_SERVERS="119.29.29.29 223.5.5.5 1.1.1.1"
-```
-
-### 调试模式
-
-临时启用详细日志:
-
-```sh
-# 1. 备份当前配置
-cp /etc/config/autologin /tmp/autologin.bak
-
-# 2. 启用文件日志
-vi /etc/config/autologin
-LOG_TYPE="1"
-LOG_FILE="/usr/local/autologin/logs/autologin.log"
-
-# 3. 重启服务
-/etc/init.d/autologin restart
-
-# 4. 实时查看日志
-tail -f /usr/local/autologin/logs/autologin.log
-
-# 5. 调试完成后恢复配置
-cp /tmp/autologin.bak /etc/config/autologin
-/etc/init.d/autologin restart
 ```
