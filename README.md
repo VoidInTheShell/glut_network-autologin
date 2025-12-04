@@ -2,17 +2,16 @@
 
 </div>
 
-> 在OpenWRT路由器上检测校园网登录状态并掉线重连，告别恶心的校园网自动掉线
+> 在OpenWRT上部署，然后忘掉校园网要登录这件事~
 
-**特别鸣谢[xhzLK123](https://github.com/xhzLK123)提供的登录入口**
+**特别鸣谢[xhzLK123](https://github.com/xhzLK123)提供的登录方法**
 
 ## 功能特性
 
-- ✅ 自动检测 OpenWrt 系统环境
-- ✅ 自动安装缺失的依赖包（wget、curl）
-- ✅ 自动获取 WAN 口本地 DHCP IP（无需手动指定接口）
 - ✅ 交互式配置（账号、密码、检测频率、日志选项）
+- ✅ 四状态机检测在线情况，远程+本地FB多机制防止误判 **[v1.2.0b]**
 - ✅ 灵活的日志管理（文件日志、syslog、禁用）
+- ✅ 更低的日志占用：运行1天只产生100kB左右实时日志（占用内存）和0.1KB左右运行日志（占用闪存）
 - ✅ 智能双层日志系统（实时+持久化故障日志）**[v1.2.0b]**
 - ✅ 完整运行统计和故障追踪（离线次数、恢复时间、DNS失败统计）**[v1.2.0b]**
 - ✅ 结构化日志分级（INFO/CHECK/OFFLINE/AUTH/ONLINE/ERROR/WARN/STAT）**[v1.2.0b]**
@@ -21,9 +20,13 @@
 - ✅ 自动配置为 OpenWrt 系统服务
 - ✅ 支持开机自启动
 - ✅ 网络断线自动重连
+- ✅ 自动检测 OpenWrt 系统环境
+- ✅ 自动安装缺失的依赖包（wget、curl）
+- ✅ 自动获取 WAN 口本地 DHCP IP（无需手动指定接口）
 
 ## 快速开始
-### 直接执行以下命令安装
+
+### 首次安装：直接执行以下命令安装
 ```
 sh -c "$(curl -fsSLk https://gh-proxy.org/raw.githubusercontent.com/VoidInTheShell/glut_network-autologin/refs/heads/feature/install.sh)"
 ```
