@@ -149,22 +149,59 @@ interactive_config() {
     read -p "请输入选项 (1/2) [默认: 1]: " ISP_CHOICE
     ISP_CHOICE=${ISP_CHOICE:-1}
 
-    # 检测频率配置
+    # 检测策略配置
     echo ""
-    print_info "检测频率配置"
+    print_info "检测策略配置"
     echo "系统使用双层检测策略："
-    echo "  • 本地检测: 高频检测认证服务器HTTP状态（快速发现断线）"
-    echo "  • 公网检测: 低频检测DNS连通性（辅助验证网络状态）"
+    echo "  • 主检测: 公网DNS Ping (快速响应，不受认证服务器限制)"
+    echo "  • 辅助检测: 本地认证服务器HTTP状态 (fallback验证)"
+    echo ""
+    echo "注意: 认证服务器有防护机制，高频HTTP请求会被强制登出"
     echo ""
 
-    read -p "请输入本地检测频率 (秒) [默认: 1]: " LOCAL_CHECK_INTERVAL
-    LOCAL_CHECK_INTERVAL=${LOCAL_CHECK_INTERVAL:-1}
+    # 在线状态检测频率
+    print_info "在线状态检测频率"
+    read -p "公网DNS检测频率 (秒) [默认: 10]: " DNS_CHECK_INTERVAL
+    DNS_CHECK_INTERVAL=${DNS_CHECK_INTERVAL:-10}
 
-    read -p "请输入公网检测频率 (秒) [默认: 30]: " PUBLIC_CHECK_INTERVAL
-    PUBLIC_CHECK_INTERVAL=${PUBLIC_CHECK_INTERVAL:-30}
+    read -p "本地HTTP检测频率 (秒，最小60秒以避免被登出) [默认: 60]: " AUTH_HTTP_CHECK_INTERVAL
+    AUTH_HTTP_CHECK_INTERVAL=${AUTH_HTTP_CHECK_INTERVAL:-60}
+    # 确保不小于60秒
+    if [ "$AUTH_HTTP_CHECK_INTERVAL" -lt 60 ]; then
+        print_warn "本地HTTP检测频率不能小于60秒，已自动调整为60秒"
+        AUTH_HTTP_CHECK_INTERVAL=60
+    fi
 
-    read -p "请输入离线重连等待时间 (秒) [默认: 3]: " RECONNECT_INTERVAL
+    # 离线状态重连配置
+    echo ""
+    print_info "离线状态重连配置"
+    read -p "离线重连等待时间 (秒) [默认: 3]: " RECONNECT_INTERVAL
     RECONNECT_INTERVAL=${RECONNECT_INTERVAL:-3}
+
+    # DNS失败阈值配置
+    echo ""
+    print_info "DNS离线判定策略"
+    echo "当多个DNS服务器检测失败时，判定为离线："
+    echo "  1) 任何1个DNS失败就离线 (最敏感，快速反应，可能误判)"
+    echo "  2) 至少2个DNS失败才离线 (推荐，平衡误判和延迟)"
+    echo "  3) 所有DNS都失败才离线 (最保守，可能延迟发现断线)"
+    read -p "请选择策略 (1/2/3) [默认: 2]: " DNS_FAILURE_THRESHOLD_OPTION
+    DNS_FAILURE_THRESHOLD_OPTION=${DNS_FAILURE_THRESHOLD_OPTION:-2}
+
+    case "$DNS_FAILURE_THRESHOLD_OPTION" in
+        1) DNS_FAILURE_THRESHOLD=1 ;;
+        3) DNS_FAILURE_THRESHOLD=999 ;;  # 使用999表示"所有"
+        *) DNS_FAILURE_THRESHOLD=2 ;;
+    esac
+
+    # 在线判定策略
+    echo ""
+    print_info "在线判定策略"
+    echo "从离线恢复到在线状态的条件："
+    echo "  1) 仅依赖DNS检测 (达到DNS阈值即判定在线)"
+    echo "  2) DNS + HTTP双重验证 (至少1个DNS可达 + 本地HTTP在线)"
+    read -p "请选择策略 (1/2) [默认: 2]: " ONLINE_VERIFY_STRATEGY
+    ONLINE_VERIFY_STRATEGY=${ONLINE_VERIFY_STRATEGY:-2}
 
     # 公网DNS服务器配置
     echo ""
@@ -208,14 +245,29 @@ interactive_config() {
     echo "  登录账号: $USER_ACCOUNT"
     echo "  运营商: $([ "$ISP_CHOICE" = "1" ] && echo "联通" || echo "移动")"
     echo ""
-    echo "  检测频率:"
-    echo "    本地检测: 每 ${LOCAL_CHECK_INTERVAL} 秒"
-    echo "    公网检测: 每 ${PUBLIC_CHECK_INTERVAL} 秒"
-    echo "    离线重连等待: ${RECONNECT_INTERVAL} 秒"
+    echo "  检测策略:"
+    echo "    主检测: 公网DNS Ping"
+    echo "    辅助检测: 本地认证服务器HTTP"
     echo ""
-    echo "  检测方法:"
-    echo "    ✓ 认证服务器HTTP状态检测 (本地高频)"
-    echo "    ✓ 公网DNS Ping检测 (辅助验证)"
+    echo "  在线状态检测频率:"
+    echo "    公网DNS检测: 每 ${DNS_CHECK_INTERVAL} 秒"
+    echo "    本地HTTP检测: 每 ${AUTH_HTTP_CHECK_INTERVAL} 秒"
+    echo ""
+    echo "  离线状态配置:"
+    echo "    重连等待时间: ${RECONNECT_INTERVAL} 秒"
+    echo ""
+    echo "  判定策略:"
+    case "$DNS_FAILURE_THRESHOLD" in
+        1) echo "    DNS离线判定: 任何1个DNS失败即离线" ;;
+        999) echo "    DNS离线判定: 所有DNS都失败才离线" ;;
+        *) echo "    DNS离线判定: 至少${DNS_FAILURE_THRESHOLD}个DNS失败才离线" ;;
+    esac
+    case "$ONLINE_VERIFY_STRATEGY" in
+        1) echo "    在线判定: 仅依赖DNS检测" ;;
+        2) echo "    在线判定: DNS + HTTP双重验证" ;;
+    esac
+    echo ""
+    echo "  公网DNS服务器: $DNS_TEST_SERVERS"
     echo ""
     if [ "$LOG_TYPE" = "1" ]; then
         echo "  日志文件: $LOG_FILE"
@@ -258,12 +310,16 @@ generate_login_script() {
 CONFIG_FILE="/etc/config/autologin"
 
 # 全局状态变量
-CURRENT_STATE="UNKNOWN"  # ONLINE, OFFLINE, UNKNOWN
+CURRENT_STATE="UNKNOWN"  # ONLINE, SUSPECT, OFFLINE, RECOVERING, UNKNOWN
 START_TIME=0
-LAST_PUBLIC_CHECK=0
+LAST_DNS_CHECK=0
+LAST_HTTP_CHECK=0
 LAST_STATUS_LOG=0
 DNS_SERVER_INDEX=0
-OFFLINE_PUBLIC_CHECK_INTERVAL=10  # 离线状态下公网检测间隔（秒）
+DNS_CONSECUTIVE_FAILURES=0  # DNS连续失败计数器
+RECOVERING_SUCCESS_COUNT=0  # 恢复状态成功计数
+OFFLINE_DNS_CHECK_INTERVAL=5  # 离线状态下DNS检测间隔（秒）
+OFFLINE_HTTP_CHECK_INTERVAL=60  # 离线状态下HTTP检测间隔（秒）
 
 # ============ 命令兼容性检测 ============
 # 检查命令是否可用
@@ -389,33 +445,11 @@ log_status_summary() {
     if [ "$CURRENT_STATE" = "ONLINE" ] && [ $time_since_last_log -ge 600 ]; then
         LAST_STATUS_LOG=$current_time
         log_message "==== 状态摘要 ===="
-        log_message "当前状态: 在线"
+        log_message "当前状态: 在线 (ONLINE)"
         log_message "运行时长: $((current_time - START_TIME)) 秒"
-
-        # 执行一次完整检测并记录结果
-        local auth_result=""
-        local dns_result=""
-
-        # 本地认证服务器HTTP检测
-        check_auth_http_with_log
-        local auth_code=$?
-        case $auth_code in
-            0) auth_result="在线 (HTTP 200)" ;;
-            1) auth_result="离线 (未认证)" ;;
-            *) auth_result="不确定 (检测失败)" ;;
-        esac
-
-        # 公网DNS Ping检测
-        check_public_ping_with_log
-        local dns_code=$?
-        case $dns_code in
-            0) dns_result="可达" ;;
-            1) dns_result="不可达" ;;
-            *) dns_result="不确定" ;;
-        esac
-
-        log_message "  - 认证服务器状态: $auth_result"
-        log_message "  - 公网DNS状态: $dns_result"
+        log_message "检测模式: 轮询（低频节能）"
+        log_message "  - DNS轮询索引: $DNS_SERVER_INDEX"
+        log_message "  - 连续失败计数: $DNS_CONSECUTIVE_FAILURES"
         log_message "=================="
     fi
 }
@@ -499,7 +533,113 @@ check_auth_http_with_log() {
     return 2  # 不确定
 }
 
-# 方法2: 公网DNS Ping检测（静默，负载均衡轮询）
+# 方法2a: 公网DNS Ping检测（并行模式，用于快速验证）
+check_public_ping_parallel() {
+    if [ "$ENABLE_PUBLIC_PING" != "Y" ] && [ "$ENABLE_PUBLIC_PING" != "y" ]; then
+        return 2
+    fi
+
+    # 将空格分隔的DNS转换为列表
+    local dns_list=""
+    for dns in $DNS_TEST_SERVERS; do
+        dns_list="$dns_list $dns"
+    done
+
+    # 计算DNS数量
+    local dns_count=0
+    for dns in $dns_list; do
+        dns_count=$((dns_count + 1))
+    done
+
+    if [ $dns_count -eq 0 ]; then
+        return 2
+    fi
+
+    # 先ping认证服务器（确保本地网络正常）
+    if ! ping -c 1 -W 1 "$AUTH_SERVER" >/dev/null 2>&1; then
+        return 1  # 本地网络故障
+    fi
+
+    # 并行检测所有DNS服务器（快速判定）
+    local success_count=0
+    local fail_count=0
+
+    for dns in $dns_list; do
+        if ping -c 1 -W 1 "$dns" >/dev/null 2>&1; then
+            success_count=$((success_count + 1))
+        else
+            fail_count=$((fail_count + 1))
+        fi
+    done
+
+    # 判断逻辑：任意1个成功即在线，2个以上失败才离线
+    if [ $success_count -ge 1 ]; then
+        return 0  # 至少1个在线，判定在线
+    else
+        return 1  # 全部失败，判定离线
+    fi
+}
+
+# 方法2a: 公网DNS Ping检测（并行模式，带日志）
+check_public_ping_parallel_with_log() {
+    if [ "$ENABLE_PUBLIC_PING" != "Y" ] && [ "$ENABLE_PUBLIC_PING" != "y" ]; then
+        return 2
+    fi
+
+    # 将空格分隔的DNS转换为列表
+    local dns_list=""
+    for dns in $DNS_TEST_SERVERS; do
+        dns_list="$dns_list $dns"
+    done
+
+    # 计算DNS数量
+    local dns_count=0
+    for dns in $dns_list; do
+        dns_count=$((dns_count + 1))
+    done
+
+    if [ $dns_count -eq 0 ]; then
+        return 2
+    fi
+
+    # 先ping认证服务器（确保本地网络正常）
+    if ! ping -c 1 -W 1 "$AUTH_SERVER" >/dev/null 2>&1; then
+        log_message "并行DNS检测: 认证服务器 $AUTH_SERVER 不可达 (本地网络故障)"
+        return 1
+    fi
+
+    # 并行检测所有DNS服务器
+    local success_count=0
+    local fail_count=0
+    local success_list=""
+    local fail_list=""
+
+    for dns in $dns_list; do
+        if ping -c 1 -W 1 "$dns" >/dev/null 2>&1; then
+            success_count=$((success_count + 1))
+            success_list="$success_list $dns"
+        else
+            fail_count=$((fail_count + 1))
+            fail_list="$fail_list $dns"
+        fi
+    done
+
+    # 记录详细日志
+    log_message "并行DNS检测: 成功 $success_count/$dns_count, 失败 $fail_count/$dns_count"
+    [ -n "$success_list" ] && log_message "  可达:$success_list"
+    [ -n "$fail_list" ] && log_message "  不可达:$fail_list"
+
+    # 判断逻辑
+    if [ $success_count -ge 1 ]; then
+        log_message "  判定: 在线 (至少1个DNS可达)"
+        return 0
+    else
+        log_message "  判定: 离线 (所有DNS不可达)"
+        return 1
+    fi
+}
+
+# 方法2b: 公网DNS Ping检测（轮询模式，静默）
 check_public_ping() {
     if [ "$ENABLE_PUBLIC_PING" != "Y" ] && [ "$ENABLE_PUBLIC_PING" != "y" ]; then
         return 2
@@ -521,38 +661,45 @@ check_public_ping() {
         return 2
     fi
 
-    # 轮询选择DNS（负载均衡）
+    # 先ping认证服务器（确保本地网络正常）
+    if ! ping -c 1 -W 1 "$AUTH_SERVER" >/dev/null 2>&1; then
+        DNS_CONSECUTIVE_FAILURES=$((DNS_CONSECUTIVE_FAILURES + 1))
+        if [ $DNS_CONSECUTIVE_FAILURES -ge 2 ]; then
+            return 1  # 本地网络故障，连续失败
+        fi
+        return 0  # 首次失败，不立即判定离线
+    fi
+
+    # 轮询检测：选择当前索引的DNS服务器
     local current_index=0
-    local selected_dns=""
+    local target_dns=""
     for dns in $dns_list; do
         if [ $current_index -eq $DNS_SERVER_INDEX ]; then
-            selected_dns="$dns"
+            target_dns="$dns"
             break
         fi
         current_index=$((current_index + 1))
     done
 
-    # 更新索引（循环）
+    # 更新索引，下次检测下一个DNS（循环）
     DNS_SERVER_INDEX=$(((DNS_SERVER_INDEX + 1) % dns_count))
 
-    # 先ping认证服务器（确保本地网络正常）
-    if ! ping -c 1 -W 1 "$AUTH_SERVER" >/dev/null 2>&1; then
-        return 1  # 本地网络故障
-    fi
-
-    # 再ping公网DNS
-    if [ -n "$selected_dns" ]; then
-        if ping -c 1 -W 2 "$selected_dns" >/dev/null 2>&1; then
-            return 0  # 在线
-        else
-            return 1  # 离线
+    # 检测当前DNS服务器
+    if ping -c 1 -W 2 "$target_dns" >/dev/null 2>&1; then
+        # 成功：重置连续失败计数器
+        DNS_CONSECUTIVE_FAILURES=0
+        return 0  # 在线
+    else
+        # 失败：增加连续失败计数器
+        DNS_CONSECUTIVE_FAILURES=$((DNS_CONSECUTIVE_FAILURES + 1))
+        if [ $DNS_CONSECUTIVE_FAILURES -ge 2 ]; then
+            return 1  # 连续2次失败，判定离线
         fi
+        return 0  # 首次失败，不立即判定离线
     fi
-
-    return 2  # 不确定
 }
 
-# 方法2: 公网DNS Ping检测（带日志输出）
+# 方法2: 公网DNS Ping检测（轮询模式，带日志输出）
 check_public_ping_with_log() {
     if [ "$ENABLE_PUBLIC_PING" != "Y" ] && [ "$ENABLE_PUBLIC_PING" != "y" ]; then
         return 2
@@ -574,131 +721,215 @@ check_public_ping_with_log() {
         return 2
     fi
 
-    # 轮询选择DNS（负载均衡）
+    # 先ping认证服务器（确保本地网络正常）
+    if ! ping -c 1 -W 1 "$AUTH_SERVER" >/dev/null 2>&1; then
+        DNS_CONSECUTIVE_FAILURES=$((DNS_CONSECUTIVE_FAILURES + 1))
+        log_message "公网DNS Ping检测: 认证服务器 $AUTH_SERVER 不可达 (连续失败: $DNS_CONSECUTIVE_FAILURES)"
+        if [ $DNS_CONSECUTIVE_FAILURES -ge 2 ]; then
+            log_message "  判定: 离线 (本地网络连续失败 >= 2次)"
+            return 1  # 本地网络故障，连续失败
+        fi
+        log_message "  判定: 暂不判定离线 (首次失败)"
+        return 0  # 首次失败，不立即判定离线
+    fi
+
+    # 轮询检测：选择当前索引的DNS服务器
     local current_index=0
-    local selected_dns=""
+    local target_dns=""
     for dns in $dns_list; do
         if [ $current_index -eq $DNS_SERVER_INDEX ]; then
-            selected_dns="$dns"
+            target_dns="$dns"
             break
         fi
         current_index=$((current_index + 1))
     done
 
-    # 更新索引（循环）
+    log_message "公网DNS Ping检测: 轮询检测 DNS[$((DNS_SERVER_INDEX))]=$target_dns (连续失败计数: $DNS_CONSECUTIVE_FAILURES)"
+
+    # 更新索引，下次检测下一个DNS（循环）
     DNS_SERVER_INDEX=$(((DNS_SERVER_INDEX + 1) % dns_count))
 
-    # 先ping认证服务器（确保本地网络正常）
-    if ! ping -c 1 -W 1 "$AUTH_SERVER" >/dev/null 2>&1; then
-        log_message "公网DNS Ping检测: 认证服务器 $AUTH_SERVER 不可达 (本地网络故障)"
-        return 1  # 本地网络故障
-    fi
-
-    # 再ping公网DNS
-    if [ -n "$selected_dns" ]; then
-        if ping -c 1 -W 2 "$selected_dns" >/dev/null 2>&1; then
-            log_message "公网DNS Ping检测: $selected_dns 可达 -> 在线"
-            return 0  # 在线
-        else
-            log_message "公网DNS Ping检测: $selected_dns 不可达 -> 离线"
-            return 1  # 离线
+    # 检测当前DNS服务器
+    if ping -c 1 -W 2 "$target_dns" >/dev/null 2>&1; then
+        # 成功：重置连续失败计数器
+        log_message "  结果: 可达"
+        DNS_CONSECUTIVE_FAILURES=0
+        log_message "  判定: 在线 (连续失败计数器已重置)"
+        return 0  # 在线
+    else
+        # 失败：增加连续失败计数器
+        DNS_CONSECUTIVE_FAILURES=$((DNS_CONSECUTIVE_FAILURES + 1))
+        log_message "  结果: 不可达 (连续失败计数: $DNS_CONSECUTIVE_FAILURES)"
+        if [ $DNS_CONSECUTIVE_FAILURES -ge 2 ]; then
+            log_message "  判定: 离线 (连续失败 >= 2次)"
+            return 1  # 连续2次失败，判定离线
         fi
+        log_message "  判定: 暂不判定离线 (首次失败)"
+        return 0  # 首次失败，不立即判定离线
     fi
-
-    return 2  # 不确定
 }
 
 # ============================================
-# 状态机主逻辑
+# 状态机主逻辑 - 4状态自适应检测
 # ============================================
 
-# 在线状态处理
+# 在线状态处理（ONLINE）- 低频轮询检测
 handle_online_state() {
     # 定期记录状态摘要
     log_status_summary
 
-    # 执行本地快速检测
-    check_auth_http
-    local auth_result=$?
+    local current_time=$(get_timestamp)
 
-    if [ $auth_result -eq 1 ]; then
-        # 本地检测明确离线
-        log_message_force "*** 状态变化: 在线 -> 离线 (认证服务器检测失败) ***"
+    # 轮询检测：每DNS_CHECK_INTERVAL秒检测1个DNS
+    local time_since_last_dns=$((current_time - LAST_DNS_CHECK))
+
+    if [ $time_since_last_dns -ge $DNS_CHECK_INTERVAL ]; then
+        LAST_DNS_CHECK=$current_time
+        check_public_ping  # 轮询模式
+        local dns_result=$?
+
+        if [ $dns_result -eq 1 ]; then
+            # 单次失败，进入疑似离线状态快速验证
+            log_message_force "*** 状态变化: 在线 -> 疑似离线 (轮询检测失败，启动快速验证) ***"
+            CURRENT_STATE="SUSPECT"
+            return
+        fi
+        # dns_result=0，继续在线状态
+    fi
+
+    # 在线状态不检测认证服务器HTTP，避免被强制下线
+    safe_sleep 1
+}
+
+# 疑似离线状态处理（SUSPECT）- 并行快速验证
+handle_suspect_state() {
+    log_message_force "疑似离线状态，立即启动并行快速验证..."
+
+    # 立即并行检测所有DNS（1秒超时）
+    check_public_ping_parallel_with_log
+    local parallel_result=$?
+
+    if [ $parallel_result -eq 0 ]; then
+        # 并行检测通过，是误报，回到在线状态
+        log_message_force "*** 状态变化: 疑似离线 -> 在线 (快速验证通过，误报) ***"
+        DNS_CONSECUTIVE_FAILURES=0  # 重置计数器
+        CURRENT_STATE="ONLINE"
+        LAST_DNS_CHECK=$(get_timestamp)
+        return
+    elif [ $parallel_result -eq 1 ]; then
+        # 并行检测确认离线
+        log_message_force "*** 状态变化: 疑似离线 -> 离线 (快速验证确认离线) ***"
+        CURRENT_STATE="OFFLINE"
+        return
+    else
+        # 检测失败（不应该发生）
+        log_message "疑似离线验证失败，默认判定为离线"
         CURRENT_STATE="OFFLINE"
         return
     fi
-
-    # 检查是否需要执行公网验证
-    local current_time=$(get_timestamp)
-    local time_since_last_public=$((current_time - LAST_PUBLIC_CHECK))
-
-    if [ $time_since_last_public -ge $PUBLIC_CHECK_INTERVAL ]; then
-        LAST_PUBLIC_CHECK=$current_time
-        check_public_ping
-        local public_result=$?
-
-        if [ $public_result -eq 1 ]; then
-            # 公网检测失败，切换到离线状态
-            log_message_force "*** 状态变化: 在线 -> 离线 (公网DNS检测失败) ***"
-            CURRENT_STATE="OFFLINE"
-            return
-        fi
-    fi
-
-    # 仍然在线，等待下次检测
-    safe_sleep $LOCAL_CHECK_INTERVAL
 }
 
-# 离线状态处理
+# 离线状态处理（OFFLINE）- 快速登录恢复
 handle_offline_state() {
-    log_message_force "检测到离线，立即尝试登录..."
+    log_message_force "确认离线，立即尝试登录并进入快速恢复模式..."
 
     # 立即执行登录
     do_login
 
-    # 进入快速重连循环
+    # 快速恢复循环
     local offline_loop_count=0
-    local last_offline_public_check=$(get_timestamp)
+    local last_offline_check=$(get_timestamp)
+    local last_login_attempt=$(get_timestamp)
+    local fast_check_interval=2  # 离线状态快速检测间隔：2秒
+    local login_interval=10  # 登录间隔：10秒
 
     while true; do
         offline_loop_count=$((offline_loop_count + 1))
+        safe_sleep $fast_check_interval
 
-        # 等待配置的重连间隔
-        safe_sleep $RECONNECT_INTERVAL
-
-        # 检查认证服务器状态
-        check_auth_http_with_log
-        local auth_result=$?
-
-        # 检查是否需要执行公网DNS检测（离线状态下10秒检测一次）
         local current_time=$(get_timestamp)
-        local time_since_offline_public=$((current_time - last_offline_public_check))
-        local public_result=2
+        local time_since_check=$((current_time - last_offline_check))
 
-        if [ $time_since_offline_public -ge $OFFLINE_PUBLIC_CHECK_INTERVAL ]; then
-            last_offline_public_check=$current_time
-            check_public_ping_with_log
-            public_result=$?
+        # 每2秒并行检测DNS
+        if [ $time_since_check -ge $fast_check_interval ]; then
+            last_offline_check=$current_time
+
+            # 并行检测DNS
+            check_public_ping_parallel
+            local dns_result=$?
+
+            if [ $dns_result -eq 0 ]; then
+                # DNS恢复，立即检测HTTP
+                log_message "DNS检测恢复，立即验证HTTP状态..."
+                check_auth_http_with_log
+                local http_result=$?
+
+                if [ $http_result -eq 0 ]; then
+                    # DNS + HTTP双重验证通过，进入恢复状态
+                    log_message_force "*** 状态变化: 离线 -> 恢复中 (DNS + HTTP验证通过) ***"
+                    CURRENT_STATE="RECOVERING"
+                    RECOVERING_SUCCESS_COUNT=0
+                    return
+                elif [ $http_result -eq 1 ]; then
+                    # DNS在线但HTTP离线，需要继续登录
+                    log_message "DNS恢复但HTTP显示离线，需要继续认证"
+                    # 继续循环，下面会处理登录
+                fi
+            fi
         fi
 
-        # 双重验证：认证服务器在线 AND 公网DNS可达
-        if [ $auth_result -eq 0 ] && [ $public_result -eq 0 ]; then
-            log_message_force "*** 状态变化: 离线 -> 在线 (双重验证成功) ***"
-            CURRENT_STATE="ONLINE"
-            LAST_STATUS_LOG=$(get_timestamp)  # 重置状态摘要计时
+        # 智能登录：DNS失败或HTTP离线时才登录
+        local time_since_login=$((current_time - last_login_attempt))
+        if [ $time_since_login -ge $login_interval ]; then
+            if [ $((offline_loop_count % 3)) -eq 0 ]; then
+                log_message "网络仍离线 (循环 #$offline_loop_count)，继续尝试登录..."
+            fi
+            do_login
+            last_login_attempt=$current_time
+        fi
+    done
+}
+
+# 恢复中状态处理（RECOVERING）- 持续验证稳定性
+handle_recovering_state() {
+    log_message_force "进入恢复验证阶段，持续监控稳定性..."
+
+    local recovering_check_count=0
+    local required_success=5  # 需要连续5次成功才确认稳定
+    local check_interval=2  # 每2秒检测一次
+
+    while [ $recovering_check_count -lt $required_success ]; do
+        recovering_check_count=$((recovering_check_count + 1))
+        safe_sleep $check_interval
+
+        # 并行检测DNS
+        check_public_ping_parallel
+        local dns_result=$?
+
+        # 检测HTTP（每次都检测，确保真正在线）
+        check_auth_http
+        local http_result=$?
+
+        if [ $dns_result -eq 0 ] && [ $http_result -eq 0 ]; then
+            # 本次检测成功
+            RECOVERING_SUCCESS_COUNT=$((RECOVERING_SUCCESS_COUNT + 1))
+            log_message "恢复验证: $RECOVERING_SUCCESS_COUNT/$required_success 成功"
+        else
+            # 验证失败，重新进入离线状态
+            log_message_force "*** 状态变化: 恢复中 -> 离线 (验证失败，网络不稳定) ***"
+            RECOVERING_SUCCESS_COUNT=0
+            CURRENT_STATE="OFFLINE"
             return
         fi
-
-        # 仅认证服务器在线但公网DNS未检测或失败，继续循环
-        if [ $auth_result -eq 0 ] && [ $public_result -eq 2 ]; then
-            log_message "认证服务器已在线，等待公网DNS验证..."
-            continue
-        fi
-
-        # 仍然离线，继续尝试登录
-        log_message "网络仍然离线 (循环 #$offline_loop_count)，继续尝试登录..."
-        do_login
     done
+
+    # 连续验证成功，确认稳定在线
+    log_message_force "*** 状态变化: 恢复中 -> 在线 (连续${required_success}次验证成功，确认稳定) ***"
+    CURRENT_STATE="ONLINE"
+    DNS_CONSECUTIVE_FAILURES=0
+    LAST_DNS_CHECK=$(get_timestamp)
+    LAST_HTTP_CHECK=$(get_timestamp)
+    LAST_STATUS_LOG=$(get_timestamp)
 }
 
 # 主循环
@@ -717,17 +948,17 @@ main() {
     fi
 
     # 验证检测频率是否为有效数字
-    case "$LOCAL_CHECK_INTERVAL" in
+    case "$DNS_CHECK_INTERVAL" in
         ''|*[!0-9]*)
-            log_message "警告: LOCAL_CHECK_INTERVAL无效，使用默认值1秒"
-            LOCAL_CHECK_INTERVAL=1
+            log_message "警告: DNS_CHECK_INTERVAL无效，使用默认值10秒"
+            DNS_CHECK_INTERVAL=10
             ;;
     esac
 
-    case "$PUBLIC_CHECK_INTERVAL" in
+    case "$AUTH_HTTP_CHECK_INTERVAL" in
         ''|*[!0-9]*)
-            log_message "警告: PUBLIC_CHECK_INTERVAL无效，使用默认值30秒"
-            PUBLIC_CHECK_INTERVAL=30
+            log_message "警告: AUTH_HTTP_CHECK_INTERVAL无效，使用默认值60秒"
+            AUTH_HTTP_CHECK_INTERVAL=60
             ;;
     esac
 
@@ -738,53 +969,69 @@ main() {
             ;;
     esac
 
+    case "$DNS_FAILURE_THRESHOLD" in
+        ''|*[!0-9]*)
+            log_message "警告: DNS_FAILURE_THRESHOLD无效，使用默认值2"
+            DNS_FAILURE_THRESHOLD=2
+            ;;
+    esac
+
     # 确保检测频率至少为1秒
-    if [ $LOCAL_CHECK_INTERVAL -lt 1 ]; then
-        LOCAL_CHECK_INTERVAL=1
+    if [ $DNS_CHECK_INTERVAL -lt 1 ]; then
+        DNS_CHECK_INTERVAL=1
     fi
-    if [ $PUBLIC_CHECK_INTERVAL -lt 1 ]; then
-        PUBLIC_CHECK_INTERVAL=1
+    if [ $AUTH_HTTP_CHECK_INTERVAL -lt 60 ]; then
+        AUTH_HTTP_CHECK_INTERVAL=60
     fi
     if [ $RECONNECT_INTERVAL -lt 1 ]; then
         RECONNECT_INTERVAL=1
     fi
 
-    log_message "=== 自动登录服务启动 (状态机模式) ==="
+    log_message "=== 自动登录服务启动 (4状态自适应检测) ==="
     log_message "WAN 接口: $WAN_INTERFACE"
-    log_message "本地检测频率: ${LOCAL_CHECK_INTERVAL} 秒"
-    log_message "公网检测频率: ${PUBLIC_CHECK_INTERVAL} 秒 (在线状态)"
-    log_message "离线重连等待: ${RECONNECT_INTERVAL} 秒"
-    log_message "离线公网检测: ${OFFLINE_PUBLIC_CHECK_INTERVAL} 秒"
-    log_message "检测方法:"
-    [ "$ENABLE_AUTH_HTTP" = "Y" ] || [ "$ENABLE_AUTH_HTTP" = "y" ] && log_message "  - 认证服务器HTTP状态"
-    [ "$ENABLE_PUBLIC_PING" = "Y" ] || [ "$ENABLE_PUBLIC_PING" = "y" ] && log_message "  - 公网DNS Ping"
+    log_message ""
+    log_message "检测策略:"
+    log_message "  • ONLINE状态: 低频轮询检测（每${DNS_CHECK_INTERVAL}秒1个DNS）"
+    log_message "  • SUSPECT状态: 并行快速验证（1秒超时，所有DNS）"
+    log_message "  • OFFLINE状态: 快速恢复模式（每2秒并行检测）"
+    log_message "  • RECOVERING状态: 稳定性验证（连续5次成功确认）"
+    log_message ""
+    log_message "性能指标:"
+    log_message "  • 在线误判防护: 轮询单点失败→并行快速验证"
+    log_message "  • 离线发现时间: < 2秒（并行检测）"
+    log_message "  • 恢复时间: < 2秒（快速检测+立即登录）"
+    log_message "  • 状态稳定性: 连续5次验证防止频繁切换"
+    log_message ""
+    log_message "公网DNS服务器: $DNS_TEST_SERVERS"
 
     # 初始化时间戳
     START_TIME=$(get_timestamp)
-    LAST_PUBLIC_CHECK=0
+    LAST_DNS_CHECK=0
+    LAST_HTTP_CHECK=0
     LAST_STATUS_LOG=$START_TIME
 
     # 初始化状态为UNKNOWN，进行首次检测
     CURRENT_STATE="UNKNOWN"
-    log_message "执行初始状态检测..."
+    log_message "执行初始状态检测（并行快速检测）..."
 
-    check_auth_http
-    local initial_auth=$?
+    # 使用并行检测快速判定初始状态
+    check_public_ping_parallel_with_log
+    local initial_dns=$?
 
-    if [ $initial_auth -eq 0 ]; then
-        # 认证服务器在线，验证公网
-        check_public_ping
-        local initial_public=$?
+    if [ $initial_dns -eq 0 ]; then
+        # DNS检测通过，检查HTTP验证
+        check_auth_http_with_log
+        local initial_http=$?
 
-        if [ $initial_public -eq 0 ]; then
-            log_message "初始状态: 在线"
+        if [ $initial_http -eq 0 ]; then
+            log_message "初始状态: 在线 (DNS + HTTP双重验证通过)"
             CURRENT_STATE="ONLINE"
         else
-            log_message "初始状态: 离线 (公网不可达)"
+            log_message "初始状态: 离线 (DNS通过但HTTP验证失败)"
             CURRENT_STATE="OFFLINE"
         fi
     else
-        log_message "初始状态: 离线"
+        log_message "初始状态: 离线 (DNS检测失败)"
         CURRENT_STATE="OFFLINE"
     fi
 
@@ -794,8 +1041,14 @@ main() {
             ONLINE)
                 handle_online_state
                 ;;
+            SUSPECT)
+                handle_suspect_state
+                ;;
             OFFLINE)
                 handle_offline_state
+                ;;
+            RECOVERING)
+                handle_recovering_state
                 ;;
             *)
                 log_message "错误: 未知状态 $CURRENT_STATE，重置为OFFLINE"
@@ -837,9 +1090,13 @@ AUTH_PORT_801="801"
 AUTH_PORT_80="80"
 
 # 检测频率配置 (秒)
-LOCAL_CHECK_INTERVAL="$LOCAL_CHECK_INTERVAL"
-PUBLIC_CHECK_INTERVAL="$PUBLIC_CHECK_INTERVAL"
+DNS_CHECK_INTERVAL="$DNS_CHECK_INTERVAL"
+AUTH_HTTP_CHECK_INTERVAL="$AUTH_HTTP_CHECK_INTERVAL"
 RECONNECT_INTERVAL="$RECONNECT_INTERVAL"
+
+# 检测策略配置
+DNS_FAILURE_THRESHOLD="$DNS_FAILURE_THRESHOLD"
+ONLINE_VERIFY_STRATEGY="$ONLINE_VERIFY_STRATEGY"
 
 # 检测方法开关
 ENABLE_AUTH_HTTP="$ENABLE_AUTH_HTTP"

@@ -169,26 +169,53 @@ stop_service() {
 
     # 尝试使用服务脚本停止
     if [ -f "$SERVICE_FILE" ]; then
+        print_info "使用服务脚本停止服务..."
         if "$SERVICE_FILE" stop 2>/dev/null; then
-            print_info "服务已停止"
+            print_info "服务已通过脚本停止"
+            sleep 2
         else
             print_warn "服务脚本停止失败，尝试强制终止进程"
         fi
+    else
+        print_info "服务脚本不存在，直接终止进程"
     fi
 
-    # 强制终止所有相关进程
+    # 强制终止所有login.sh进程
     local pids=$(pgrep -f "/usr/local/autologin/login.sh" 2>/dev/null || true)
     if [ -n "$pids" ]; then
-        print_info "终止进程: $pids"
-        kill -9 $pids 2>/dev/null || true
+        print_info "终止login.sh进程: $pids"
+        kill -15 $pids 2>/dev/null || true  # 先尝试优雅终止
+        sleep 2
+
+        # 检查是否还有残留进程，强制kill
+        pids=$(pgrep -f "/usr/local/autologin/login.sh" 2>/dev/null || true)
+        if [ -n "$pids" ]; then
+            print_warn "进程未响应SIGTERM，使用SIGKILL强制终止: $pids"
+            kill -9 $pids 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+
+    # 额外检查：终止所有包含autologin的进程
+    local autologin_pids=$(pgrep -f "autologin" 2>/dev/null || true)
+    if [ -n "$autologin_pids" ]; then
+        print_info "终止其他autologin相关进程: $autologin_pids"
+        kill -9 $autologin_pids 2>/dev/null || true
         sleep 1
     fi
 
-    # 验证进程是否已终止
+    # 最终验证进程是否已终止
     if pgrep -f "/usr/local/autologin/login.sh" >/dev/null 2>&1; then
         print_error "警告: 部分进程可能仍在运行"
+        local remaining=$(pgrep -af "/usr/local/autologin" 2>/dev/null || true)
+        if [ -n "$remaining" ]; then
+            print_error "残留进程详情:"
+            echo "$remaining" | while read -r line; do
+                echo "  $line"
+            done
+        fi
     else
-        print_info "所有进程已终止"
+        print_info "所有进程已成功终止"
     fi
 }
 
@@ -220,6 +247,16 @@ remove_files() {
         removed=1
     fi
 
+    # 删除 rc.d 中的符号链接（OpenWrt 自启动机制）
+    local rc_links=$(find /etc/rc.d -name '*autologin' 2>/dev/null || true)
+    if [ -n "$rc_links" ]; then
+        echo "$rc_links" | while read -r link; do
+            rm -f "$link"
+            print_info "已删除: $link"
+        done
+        removed=1
+    fi
+
     # 删除配置文件
     if [ -f "$CONFIG_FILE" ]; then
         rm -f "$CONFIG_FILE"
@@ -243,19 +280,55 @@ remove_files() {
 cleanup_residuals() {
     print_step "清理残留..."
 
+    local cleaned=0
+
     # 检查是否有残留的进程
     if pgrep -f "autologin" >/dev/null 2>&1; then
         print_warn "发现残留进程，尝试清理..."
         pkill -9 -f "autologin" 2>/dev/null || true
+        cleaned=1
     fi
 
-    # 检查是否有残留的临时文件
-    if [ -d "/tmp/autologin"* 2>/dev/null ]; then
-        print_info "清理临时文件..."
-        rm -rf /tmp/autologin* 2>/dev/null || true
+    # 检查是否有残留的login.sh进程（可能使用不同的进程名）
+    if pgrep -f "/usr/local/autologin/login.sh" >/dev/null 2>&1; then
+        print_warn "发现login.sh进程，强制终止..."
+        pkill -9 -f "/usr/local/autologin/login.sh" 2>/dev/null || true
+        cleaned=1
     fi
 
-    print_info "清理完成"
+    # 清理临时文件 - autologin备份目录（除了当前备份）
+    local temp_files=$(find /tmp -maxdepth 1 -name "autologin_backup_*" 2>/dev/null | grep -v "$BACKUP_DIR" || true)
+    if [ -n "$temp_files" ]; then
+        print_info "清理旧备份文件..."
+        echo "$temp_files" | while read -r file; do
+            rm -rf "$file" 2>/dev/null || true
+        done
+        cleaned=1
+    fi
+
+    # 清理运行时脚本产生的临时文件
+    local auth_temp_files=$(find /tmp -maxdepth 1 -name "auth_http_check.*" 2>/dev/null || true)
+    if [ -n "$auth_temp_files" ]; then
+        print_info "清理HTTP检测临时文件..."
+        echo "$auth_temp_files" | while read -r file; do
+            rm -f "$file" 2>/dev/null || true
+        done
+        cleaned=1
+    fi
+
+    # 清理可能的日志文件备份
+    if [ -f "/usr/local/autologin/logs/autologin.log.old" ]; then
+        # 注意：这个文件会随着安装目录一起删除，这里是双重保险
+        print_info "清理日志备份文件..."
+        rm -f "/usr/local/autologin/logs/autologin.log.old" 2>/dev/null || true
+        cleaned=1
+    fi
+
+    if [ $cleaned -eq 0 ]; then
+        print_info "无残留文件需要清理"
+    else
+        print_info "残留清理完成"
+    fi
 }
 
 # 验证卸载
@@ -265,6 +338,7 @@ verify_uninstall() {
     local failed=0
     local status=""
 
+    # 检查服务文件
     if [ -f "$SERVICE_FILE" ]; then
         status="${status}  ${RED}✗ 服务文件仍存在${NC}\n"
         failed=1
@@ -272,6 +346,7 @@ verify_uninstall() {
         status="${status}  ${GREEN}✓ 服务文件已删除${NC}\n"
     fi
 
+    # 检查配置文件
     if [ -f "$CONFIG_FILE" ]; then
         status="${status}  ${RED}✗ 配置文件仍存在${NC}\n"
         failed=1
@@ -279,6 +354,7 @@ verify_uninstall() {
         status="${status}  ${GREEN}✓ 配置文件已删除${NC}\n"
     fi
 
+    # 检查安装目录
     if [ -d "$INSTALL_DIR" ]; then
         status="${status}  ${RED}✗ 安装目录仍存在${NC}\n"
         failed=1
@@ -286,11 +362,30 @@ verify_uninstall() {
         status="${status}  ${GREEN}✓ 安装目录已删除${NC}\n"
     fi
 
+    # 检查进程
     if pgrep -f "/usr/local/autologin" >/dev/null 2>&1; then
         status="${status}  ${RED}✗ 进程仍在运行${NC}\n"
         failed=1
     else
         status="${status}  ${GREEN}✓ 所有进程已终止${NC}\n"
+    fi
+
+    # 检查 rc.d 符号链接
+    local rc_link_count=$(find /etc/rc.d -name '*autologin' 2>/dev/null | wc -l)
+    if [ "$rc_link_count" -gt 0 ]; then
+        status="${status}  ${RED}✗ rc.d 符号链接仍存在${NC}\n"
+        failed=1
+    else
+        status="${status}  ${GREEN}✓ rc.d 符号链接已删除${NC}\n"
+    fi
+
+    # 检查临时文件残留
+    local temp_count=$(find /tmp -maxdepth 1 -name "auth_http_check.*" 2>/dev/null | wc -l)
+    if [ "$temp_count" -gt 0 ]; then
+        status="${status}  ${YELLOW}⚠ 发现 $temp_count 个临时文件残留${NC}\n"
+        # 临时文件残留不算严重失败，只是警告
+    else
+        status="${status}  ${GREEN}✓ 临时文件已清理${NC}\n"
     fi
 
     echo ""
@@ -318,8 +413,15 @@ show_result() {
             echo "  1. 重新运行 install.sh"
             echo "  2. 从备份恢复配置: cp $BACKUP_DIR/autologin /etc/config/"
             echo "  3. 重启服务: /etc/init.d/autologin restart"
+            echo ""
+            echo "注意: 新版本使用DNS轮询检测，配置参数可能需要调整"
         else
             echo "如需重新安装，请运行: bash install.sh"
+            echo ""
+            echo "新版本改进:"
+            echo "  • DNS轮询检测 - 降低对公网DNS服务器的请求频率"
+            echo "  • 连续失败判定 - 2次连续失败才判定离线，减少误判"
+            echo "  • 在线状态保护 - 不主动请求认证服务器，避免被强制下线"
         fi
 
         echo ""
@@ -332,10 +434,22 @@ show_result() {
         echo "请检查上述错误信息，可能需要手动清理残留文件"
         echo ""
         echo "手动清理命令:"
+        echo "  # 停止所有相关进程"
+        echo "  pkill -9 -f autologin"
+        echo "  pkill -9 -f /usr/local/autologin/login.sh"
+        echo ""
+        echo "  # 删除文件和目录"
         echo "  rm -f $SERVICE_FILE"
         echo "  rm -f $CONFIG_FILE"
         echo "  rm -rf $INSTALL_DIR"
-        echo "  pkill -9 -f autologin"
+        echo "  rm -f /etc/rc.d/*autologin*"
+        echo ""
+        echo "  # 清理临时文件"
+        echo "  rm -f /tmp/auth_http_check.*"
+        echo "  rm -rf /tmp/autologin_backup_*"
+        echo ""
+        echo "  # 禁用自启动（如果服务文件存在）"
+        echo "  /etc/init.d/autologin disable 2>/dev/null || true"
     fi
 
     echo ""
