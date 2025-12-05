@@ -207,8 +207,12 @@ AUTH_PORT_80="80"
 
 # 检测频率配置 (秒)
 DNS_CHECK_INTERVAL="10"           # 公网DNS检测频率
-AUTH_HTTP_CHECK_INTERVAL="60"     # 本地HTTP检测频率 (最小60秒)
+AUTH_HTTP_CHECK_INTERVAL="60"     # 已废弃 (v1.3.1+，仅保留兼容)
 RECONNECT_INTERVAL="3"            # 离线重连等待时间
+
+# 离线状态检测配置 (v1.3.0+)
+OFFLINE_AUTH_INTERVAL="2"         # 离线时登录请求间隔
+OFFLINE_HTTP_CHECK_INTERVAL="2"   # 离线时状态查询间隔
 
 # 检测策略配置
 DNS_FAILURE_THRESHOLD="2"         # DNS离线判定阈值 (1/2/999)
@@ -225,6 +229,7 @@ DNS_TEST_SERVERS="119.29.29.29 223.5.5.5 1.1.1.1"
 LOG_TYPE="1"                      # 1=文件, 2=syslog, 3=禁用
 LOG_FILE="/usr/local/autologin/logs/autologin.log"
 LOG_SIZE_MB="10"                  # 日志大小限制 (MB)
+LOG_SUSPECT_STATE="N"             # 记录疑似离线日志 (v1.3.1+)
 ```
 
 修改后重启服务使配置生效：
@@ -481,9 +486,11 @@ pkill -9 -f autologin
 vi /etc/config/autologin
 
 # 修改以下参数 (单位: 秒)
-DNS_CHECK_INTERVAL="10"        # 在线状态DNS检测间隔
-AUTH_HTTP_CHECK_INTERVAL="60"  # HTTP检测间隔 (最小60秒)
-RECONNECT_INTERVAL="3"         # 离线状态重连间隔
+DNS_CHECK_INTERVAL="10"              # 在线状态DNS检测间隔
+OFFLINE_AUTH_INTERVAL="2"            # 离线时登录请求间隔 (v1.3.0+)
+OFFLINE_HTTP_CHECK_INTERVAL="2"      # 离线时状态查询间隔 (v1.3.0+)
+RECONNECT_INTERVAL="3"               # 离线状态重连间隔
+# AUTH_HTTP_CHECK_INTERVAL="60"      # 已废弃 (v1.3.1+)
 
 # 重启服务
 /etc/init.d/autologin restart
