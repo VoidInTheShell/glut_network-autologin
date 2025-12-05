@@ -2,7 +2,7 @@
 #
 # OpenWrt 自动登录服务卸载脚本
 # 撤销所有安装更改，支持部分安装状态
-
+#
 set -e
 
 INSTALL_DIR="/usr/local/autologin"
