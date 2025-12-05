@@ -3,16 +3,16 @@
 # OpenWrt 自动登录服务安装脚本
 # 自动检测环境、安装依赖、配置服务
 #
-# 版本: v1.3.4 (2025-12-05)
-# 更新: 状态文件格式修复
+# 版本: v1.3.1 (2025-12-05)
+# 更新: 疑似离线日志可配置
 #
 
 set -e
 
 # 版本信息
-VERSION="v1.3.4"
+VERSION="v1.3.1"
 VERSION_DATE="2025-12-05"
-VERSION_DESC="状态文件格式修复"
+VERSION_DESC="疑似离线日志可配置"
 
 INSTALL_DIR="/usr/local/autologin"
 CONFIG_FILE="/etc/config/autologin"
