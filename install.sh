@@ -3,16 +3,16 @@
 # OpenWrt 自动登录服务安装脚本
 # 自动检测环境、安装依赖、配置服务
 #
-# 版本: v1.3.1 (2025-12-05)
-# 更新: 疑似离线日志可配置
+# 版本: v1.3.4 (2025-12-05)
+# 更新: 状态文件格式修复
 #
 
 set -e
 
 # 版本信息
-VERSION="v1.3.1"
+VERSION="v1.3.4"
 VERSION_DATE="2025-12-05"
-VERSION_DESC="疑似离线日志可配置"
+VERSION_DESC="状态文件格式修复"
 
 INSTALL_DIR="/usr/local/autologin"
 CONFIG_FILE="/etc/config/autologin"
@@ -172,9 +172,6 @@ interactive_config() {
     read -p "公网DNS检测频率 (秒) [默认: 10]: " DNS_CHECK_INTERVAL
     DNS_CHECK_INTERVAL=${DNS_CHECK_INTERVAL:-10}
 
-    read -p "本地HTTP检测频率 (秒) [默认: 60]: " AUTH_HTTP_CHECK_INTERVAL
-    AUTH_HTTP_CHECK_INTERVAL=${AUTH_HTTP_CHECK_INTERVAL:-60}
-
     # 离线状态检测配置
     echo ""
     print_info "离线状态检测配置"
@@ -304,7 +301,6 @@ interactive_config() {
     echo ""
     echo "  在线状态检测频率:"
     echo "    公网DNS检测: 每 ${DNS_CHECK_INTERVAL} 秒"
-    echo "    本地HTTP检测: 每 ${AUTH_HTTP_CHECK_INTERVAL} 秒"
     echo ""
     echo "  离线状态配置:"
     echo "    登录请求间隔: ${OFFLINE_AUTH_INTERVAL} 秒"
@@ -508,15 +504,35 @@ load_config() {
 
 # 初始化状态文件
 init_state_file() {
+    local now=$(get_timestamp)
+    local now_readable=$(date -d "@$now" "+%a %b %e %H:%M:%S CST %Y" 2>/dev/null || date "+%a %b %e %H:%M:%S CST %Y")
+
+    # 检查文件是否存在且完整
+    local need_init=0
     if [ ! -f "$STATE_FILE" ]; then
-        local now=$(get_timestamp)
-        local now_readable=$(date -d "@$now" "+%a %b %e %H:%M:%S CST %Y" 2>/dev/null || date "+%a %b %e %H:%M:%S CST %Y")
+        need_init=1
+    else
+        # 检查关键字段是否存在
+        if ! grep -q "^OFFLINE_COUNT=" "$STATE_FILE" 2>/dev/null || \
+           ! grep -q "^AUTH_TOTAL_COUNT=" "$STATE_FILE" 2>/dev/null || \
+           ! grep -q "^ONLINE_SINCE=" "$STATE_FILE" 2>/dev/null; then
+            need_init=1
+        fi
+    fi
+
+    if [ $need_init -eq 1 ]; then
+        # 如果是重新初始化，保留FIRST_START_TIME
+        local first_start=$now
+        if [ -f "$STATE_FILE" ] && grep -q "^FIRST_START_TIME=" "$STATE_FILE" 2>/dev/null; then
+            first_start=$(grep "^FIRST_START_TIME=" "$STATE_FILE" | cut -d'=' -f2 | awk '{print $1}')
+        fi
+
         cat > "$STATE_FILE" << EOF
 # 自动登录服务运行状态
 # 此文件由系统自动维护，请勿手动编辑
 
 # 服务运行统计
-FIRST_START_TIME=$now  # $now_readable
+FIRST_START_TIME=$first_start  # $(date -d "@$first_start" "+%a %b %e %H:%M:%S CST %Y" 2>/dev/null || date "+%a %b %e %H:%M:%S CST %Y")
 LAST_START_TIME=$now  # $now_readable
 TOTAL_OFFLINE_SECONDS=0
 
@@ -555,10 +571,10 @@ LAST_HOUR_OFFLINE_COUNT=0
 LAST_HOUR_START_TIME=$now  # $now_readable
 CONSECUTIVE_AUTH_FAILURES=0
 EOF
+    else
+        # 文件存在且完整，只更新最后启动时间
+        update_state "LAST_START_TIME" "$now"
     fi
-    # 更新最后启动时间
-    local now=$(get_timestamp)
-    update_state "LAST_START_TIME" "$now"
 }
 
 # 加载状态文件
@@ -610,13 +626,21 @@ update_state() {
             ;;
     esac
 
-    # 如果字段存在则更新，否则追加
+    # 如果字段存在则更新，否则重新初始化文件
     if grep -q "^${key}=" "$STATE_FILE" 2>/dev/null; then
         grep -v "^${key}=" "$STATE_FILE" > "$tmp_file"
         echo "${key}=${value}${comment}" >> "$tmp_file"
         mv "$tmp_file" "$STATE_FILE"
     else
-        echo "${key}=${value}${comment}" >> "$STATE_FILE"
+        # 字段不存在，说明文件不完整，重新初始化
+        log_with_level "WARN" "状态文件缺少字段 ${key}，重新初始化"
+        init_state_file
+        # 重新尝试更新
+        if grep -q "^${key}=" "$STATE_FILE" 2>/dev/null; then
+            grep -v "^${key}=" "$STATE_FILE" > "$tmp_file"
+            echo "${key}=${value}${comment}" >> "$tmp_file"
+            mv "$tmp_file" "$STATE_FILE"
+        fi
     fi
 }
 
@@ -1500,10 +1524,10 @@ main() {
             ;;
     esac
 
+    # AUTH_HTTP_CHECK_INTERVAL已废弃，仅保留用于兼容旧版本配置（v1.3.3+）
     case "$AUTH_HTTP_CHECK_INTERVAL" in
         ''|*[!0-9]*)
-            log_with_level "WARN" "AUTH_HTTP_CHECK_INTERVAL无效，使用默认值60秒"
-            AUTH_HTTP_CHECK_INTERVAL=60
+            AUTH_HTTP_CHECK_INTERVAL=60  # 默认值，实际未使用
             ;;
     esac
 
