@@ -30,15 +30,15 @@
 
 ### 首次安装：直接执行以下命令安装
 ```
-sh -c "$(curl -fsSLk https://gh-proxy.org/raw.githubusercontent.com/VoidInTheShell/glut_network-autologin/refs/heads/feature/install.sh)"
+sh -c "$(curl -fsSLk https://gh-proxy.org/raw.githubusercontent.com/VoidInTheShell/glut_network-autologin/refs/heads/main/install.sh)"
 ```
 
 ### 升级脚本
 ```
 # 首先卸载旧版本
-sh -c "$(curl -fsSLk https://gh-proxy.org/raw.githubusercontent.com/VoidInTheShell/glut_network-autologin/refs/heads/feature/uninstall.sh)"
+sh -c "$(curl -fsSLk https://gh-proxy.org/raw.githubusercontent.com/VoidInTheShell/glut_network-autologin/refs/heads/main/uninstall.sh)"
 # 然后安装新版本
-sh -c "$(curl -fsSLk https://gh-proxy.org/raw.githubusercontent.com/VoidInTheShell/glut_network-autologin/refs/heads/feature/install.sh)"
+sh -c "$(curl -fsSLk https://gh-proxy.org/raw.githubusercontent.com/VoidInTheShell/glut_network-autologin/refs/heads/main/install.sh)"
 ```
 
 ### 命令无法执行时，使用下面的方法安装
