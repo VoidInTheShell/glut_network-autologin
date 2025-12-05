@@ -1,6 +1,6 @@
 # 自动登录服务配置文件示例
 #
-# 版本: v1.2.1b (日志增强)
+# 版本: v1.3.1
 # 此文件展示了所有可配置的选项
 # 实际配置文件会在安装时自动生成到：/etc/config/autologin
 
@@ -39,14 +39,24 @@ AUTH_PORT_80="80"
 DNS_CHECK_INTERVAL="10"
 
 # 本地HTTP检测频率（单位：秒）
-# 最小值：60秒（防止被强制登出）
-# 推荐值：60-120秒
-# 说明：检测认证服务器HTTP状态的间隔
+# 注意：此参数已废弃（v1.3.1+），仅保留用于兼容旧版本
+# 实际HTTP检测间隔由 OFFLINE_HTTP_CHECK_INTERVAL 控制
 AUTH_HTTP_CHECK_INTERVAL="60"
+
+# 离线状态检测配置（v1.3.0+）
+# 离线时登录请求发送间隔（单位：秒）
+# 推荐值：2-5秒
+# 说明：检测到离线后，每隔多久发送一次登录请求
+OFFLINE_AUTH_INTERVAL="2"
+
+# 离线时本地登录状态查询间隔（单位：秒）
+# 推荐值：2-5秒
+# 说明：检测到离线后，每隔多久查询一次登录状态
+OFFLINE_HTTP_CHECK_INTERVAL="2"
 
 # 离线状态重连等待时间（单位：秒）
 # 推荐值：3-5秒
-# 说明：离线后快速重连循环中的等待间隔
+# 说明：离线后快速重连循环中的等待间隔（保留用于兼容性）
 RECONNECT_INTERVAL="3"
 
 # DNS离线判定策略
@@ -111,6 +121,13 @@ OFFLINE_ALERT_THRESHOLD="3"
 # 连续认证失败次数超过此值时输出告警
 # 推荐值：3-5次
 AUTH_FAIL_THRESHOLD="3"
+
+# 疑似离线日志记录配置（v1.3.1+）
+# Y = 记录疑似离线信息到持久化日志
+# N = 不记录（默认，减少日志量）
+# 说明：网络波动时会频繁触发疑似离线状态
+# 建议：网络稳定环境选择N，需要调试时选择Y
+LOG_SUSPECT_STATE="N"
 
 # 状态持久化文件路径
 # 存储运行统计、离线事件、认证记录等
@@ -233,24 +250,31 @@ STATE_FILE="/usr/local/autologin/runtime.state"
 #    - 仅启用必要的检测方法
 #    - 适当调整告警阈值，减少不必要的告警
 
-# 9. v1.2.1b 更新说明：
-#    - 修复 persistent.log 未创建问题（故障日志立即写入）
-#    - 修复禁ping误判问题（DNS+HTTP双重验证）
-#    - 修复DNS统计硬编码（动态适配配置）
-#    - 改进时间显示格式（人类可读）
+# 9. v1.3.1 更新说明：
+#    - 新增 OFFLINE_AUTH_INTERVAL 和 OFFLINE_HTTP_CHECK_INTERVAL 参数
+#    - 新增 LOG_SUSPECT_STATE 参数（控制疑似离线日志记录）
+#    - 废弃 AUTH_HTTP_CHECK_INTERVAL（仅保留用于兼容）
+#    - 修复 runtime.state 初始化和字段排序问题
 
 # ==================== 配置兼容性 ====================
 
-# v1.2.0b+ 新增配置项（旧版本不适用）：
-#   DNS_CHECK_INTERVAL, AUTH_HTTP_CHECK_INTERVAL, RECONNECT_INTERVAL
+# v1.3.0+ 新增配置项：
+#   OFFLINE_AUTH_INTERVAL, OFFLINE_HTTP_CHECK_INTERVAL
+
+# v1.3.1+ 新增配置项：
+#   LOG_SUSPECT_STATE
+
+# v1.2.0b+ 新增配置项：
+#   DNS_CHECK_INTERVAL, RECONNECT_INTERVAL
 #   DNS_FAILURE_THRESHOLD, ONLINE_VERIFY_STRATEGY, DNS_TEST_SERVERS
 #   ENABLE_AUTH_HTTP, ENABLE_PUBLIC_PING
 #   REALTIME_LOG_FILE, PERSISTENT_LOG_FILE, REALTIME_LOG_SIZE_MB
 #   STAT_INTERVAL, OFFLINE_ALERT_THRESHOLD, AUTH_FAIL_THRESHOLD, STATE_FILE
 
-# v1.2.0b 之前的配置项（已废弃）：
+# 已废弃配置项：
 #   CHECK_INTERVAL（毫秒）- 替换为 DNS_CHECK_INTERVAL（秒）
 #   LOG_FILE - 替换为 REALTIME_LOG_FILE 和 PERSISTENT_LOG_FILE
+#   AUTH_HTTP_CHECK_INTERVAL - 替换为 OFFLINE_HTTP_CHECK_INTERVAL
 
 # 从旧版本升级：
-#   建议重新运行 install.sh，系统会自动迁移配置
+#   建议重新运行 install.sh，系统会自动迁移配置并补全缺失参数
