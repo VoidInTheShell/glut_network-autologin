@@ -3,16 +3,16 @@
 # OpenWrt 自动登录服务安装脚本
 # 自动检测环境、安装依赖、配置服务
 #
-# 版本: v1.2.1 (2025-12-04)
-# 更新: 关键问题修复版
+# 版本: v1.3.1 (2025-12-05)
+# 更新: 疑似离线日志可配置
 #
 
 set -e
 
 # 版本信息
-VERSION="v1.2.2b"
-VERSION_DATE="2025-12-04"
-VERSION_DESC="日志增强"
+VERSION="v1.3.1"
+VERSION_DATE="2025-12-05"
+VERSION_DESC="疑似离线日志可配置"
 
 INSTALL_DIR="/usr/local/autologin"
 CONFIG_FILE="/etc/config/autologin"
@@ -172,15 +172,20 @@ interactive_config() {
     read -p "公网DNS检测频率 (秒) [默认: 10]: " DNS_CHECK_INTERVAL
     DNS_CHECK_INTERVAL=${DNS_CHECK_INTERVAL:-10}
 
-    read -p "本地HTTP检测频率 (秒，最小60秒以避免被登出) [默认: 60]: " AUTH_HTTP_CHECK_INTERVAL
+    read -p "本地HTTP检测频率 (秒) [默认: 60]: " AUTH_HTTP_CHECK_INTERVAL
     AUTH_HTTP_CHECK_INTERVAL=${AUTH_HTTP_CHECK_INTERVAL:-60}
-    # 确保不小于60秒
-    if [ "$AUTH_HTTP_CHECK_INTERVAL" -lt 60 ]; then
-        print_warn "本地HTTP检测频率不能小于60秒，已自动调整为60秒"
-        AUTH_HTTP_CHECK_INTERVAL=60
-    fi
 
-    # 离线状态重连配置
+    # 离线状态检测配置
+    echo ""
+    print_info "离线状态检测配置"
+    echo "当检测到离线时，系统会尝试重新认证并检测登录状态"
+    read -p "离线时登录请求发送间隔 (秒) [默认: 2]: " OFFLINE_AUTH_INTERVAL
+    OFFLINE_AUTH_INTERVAL=${OFFLINE_AUTH_INTERVAL:-2}
+
+    read -p "离线时本地登录状态查询间隔 (秒) [默认: 2]: " OFFLINE_HTTP_CHECK_INTERVAL
+    OFFLINE_HTTP_CHECK_INTERVAL=${OFFLINE_HTTP_CHECK_INTERVAL:-2}
+
+    # 离线状态重连配置（保留用于兼容性）
     echo ""
     print_info "离线状态重连配置"
     read -p "离线重连等待时间 (秒) [默认: 3]: " RECONNECT_INTERVAL
@@ -259,6 +264,14 @@ interactive_config() {
         read -p "状态摘要输出间隔 (秒) [默认: 3600 (1小时)]: " STAT_INTERVAL
         STAT_INTERVAL=${STAT_INTERVAL:-3600}
 
+        # 疑似离线日志记录配置
+        echo ""
+        print_info "疑似离线日志记录配置"
+        echo "网络波动时会频繁触发疑似离线状态，记录这些信息会导致日志量增大"
+        echo "建议：网络稳定环境选择 N，网络波动大需要调试时选择 Y"
+        read -p "是否记录疑似离线信息到持久化日志? (Y/N) [默认: N]: " LOG_SUSPECT_STATE
+        LOG_SUSPECT_STATE=${LOG_SUSPECT_STATE:-N}
+
         LOG_DIR="$INSTALL_DIR/logs"
         PERSISTENT_LOG_FILE="$LOG_DIR/persistent.log"
         REALTIME_LOG_DIR="/tmp/autologin"
@@ -294,6 +307,8 @@ interactive_config() {
     echo "    本地HTTP检测: 每 ${AUTH_HTTP_CHECK_INTERVAL} 秒"
     echo ""
     echo "  离线状态配置:"
+    echo "    登录请求间隔: ${OFFLINE_AUTH_INTERVAL} 秒"
+    echo "    状态查询间隔: ${OFFLINE_HTTP_CHECK_INTERVAL} 秒"
     echo "    重连等待时间: ${RECONNECT_INTERVAL} 秒"
     echo ""
     echo "  判定策略:"
@@ -675,7 +690,7 @@ get_wan_mac() {
 # ============ 智能日志系统 ============
 
 # 带级别的日志输出函数
-# 级别: INFO, CHECK, OFFLINE, AUTH, ONLINE, ERROR, STAT, WARN
+# 级别: INFO, CHECK, OFFLINE, AUTH, ONLINE, ERROR, STAT, WARN, SUSPECT
 log_with_level() {
     local level="$1"
     local message="$2"
@@ -695,6 +710,14 @@ log_with_level() {
 
                 # 追加到持久化日志
                 echo "$log_line" >> "$PERSISTENT_LOG_FILE"
+                ;;
+            SUSPECT)
+                # SUSPECT级别日志根据配置决定是否写入持久化日志（v1.3.1+）
+                if [ "$LOG_SUSPECT_STATE" = "Y" ] || [ "$LOG_SUSPECT_STATE" = "y" ]; then
+                    local log_dir=$(dirname "$PERSISTENT_LOG_FILE")
+                    [ ! -d "$log_dir" ] && mkdir -p "$log_dir"
+                    echo "$log_line" >> "$PERSISTENT_LOG_FILE"
+                fi
                 ;;
         esac
 
@@ -942,13 +965,16 @@ check_auth_http() {
         return 2
     fi
 
-    local response=$(wget --timeout=2 --tries=1 --server-response -qO- "http://${AUTH_SERVER}/" 2>&1)
+    local check_url="http://${AUTH_SERVER}/drcom/chkstatus?callback=dr1002&jsVersion=4.X&v=1523&lang=zh"
+    local response=$(wget --timeout=2 --tries=1 -qO- "$check_url" 2>&1)
     local wget_exit=$?
 
     if [ $wget_exit -eq 0 ]; then
-        if echo "$response" | grep -q "Dr.COMWebLoginID_3.htm"; then
+        # 检查响应中的result字段
+        # result:1 表示已登录，result:0 表示未登录
+        if echo "$response" | grep -q '"result":1'; then
             return 0  # 在线
-        elif echo "$response" | grep -q "Dr.COMWebLoginID_2.htm"; then
+        elif echo "$response" | grep -q '"result":0'; then
             return 1  # 离线
         fi
     fi
@@ -961,8 +987,9 @@ check_auth_http_with_log() {
         return 2
     fi
 
+    local check_url="http://${AUTH_SERVER}/drcom/chkstatus?callback=dr1002&jsVersion=4.X&v=1523&lang=zh"
     local temp_file="/tmp/auth_http_check.$$"
-    local response=$(wget --timeout=2 --tries=1 --server-response -qO- "http://${AUTH_SERVER}/" 2>&1 | tee "$temp_file")
+    local response=$(wget --timeout=2 --tries=1 --server-response -qO- "$check_url" 2>&1 | tee "$temp_file")
     local wget_exit=$?
 
     # 提取HTTP状态码
@@ -974,14 +1001,16 @@ check_auth_http_with_log() {
     fi
 
     if [ $wget_exit -eq 0 ]; then
-        if echo "$response" | grep -q "Dr.COMWebLoginID_3.htm"; then
-            log_message "认证服务器HTTP检测: 在线 (状态码: $http_code)"
+        # 检查响应中的result字段
+        # result:1 表示已登录，result:0 表示未登录
+        if echo "$response" | grep -q '"result":1'; then
+            log_message "认证服务器HTTP检测: 在线 (状态码: $http_code, result:1)"
             return 0  # 在线
-        elif echo "$response" | grep -q "Dr.COMWebLoginID_2.htm"; then
-            log_message "认证服务器HTTP检测: 离线/未认证 (状态码: $http_code)"
+        elif echo "$response" | grep -q '"result":0'; then
+            log_message "认证服务器HTTP检测: 离线/未认证 (状态码: $http_code, result:0)"
             return 1  # 离线
         else
-            log_message "认证服务器HTTP检测: 无法判断状态 (状态码: $http_code)"
+            log_message "认证服务器HTTP检测: 无法判断状态 (状态码: $http_code, 响应格式异常)"
         fi
     else
         log_message "认证服务器HTTP检测: 连接失败 (退出码: $wget_exit)"
@@ -1261,7 +1290,7 @@ handle_online_state() {
 
         if [ $dns_result -eq 1 ]; then
             # 单次失败，进入疑似离线状态快速验证
-            log_with_level "OFFLINE" "*** 状态变化: 在线 -> 疑似离线 (轮询检测失败，启动快速验证) ***"
+            log_with_level "SUSPECT" "*** 状态变化: 在线 -> 疑似离线 (轮询检测失败，启动快速验证) ***"
             CURRENT_STATE="SUSPECT"
             return
         fi
@@ -1274,7 +1303,7 @@ handle_online_state() {
 
 # 疑似离线状态处理（SUSPECT）- 并行快速验证
 handle_suspect_state() {
-    log_with_level "CHECK" "疑似离线状态，立即启动并行快速验证..."
+    log_with_level "SUSPECT" "疑似离线状态，立即启动并行快速验证..."
 
     # 立即并行检测所有DNS（1秒超时）
     check_public_ping_parallel_with_log
@@ -1282,7 +1311,7 @@ handle_suspect_state() {
 
     if [ $parallel_result -eq 0 ]; then
         # 并行检测通过，是误报，回到在线状态
-        log_with_level "ONLINE" "*** 状态变化: 疑似离线 -> 在线 (快速验证通过，误报) ***"
+        log_with_level "SUSPECT" "*** 状态变化: 疑似离线 -> 在线 (快速验证通过，误报) ***"
         DNS_CONSECUTIVE_FAILURES=0  # 重置计数器
         CURRENT_STATE="ONLINE"
         LAST_DNS_CHECK=$(get_timestamp)
@@ -1334,8 +1363,8 @@ handle_offline_state() {
     local offline_loop_count=0
     local last_offline_check=$(get_timestamp)
     local last_login_attempt=$(get_timestamp)
-    local fast_check_interval=2  # 离线状态快速检测间隔：2秒
-    local login_interval=10  # 登录间隔：10秒
+    local fast_check_interval=$OFFLINE_HTTP_CHECK_INTERVAL  # 离线时本地登录状态查询间隔（v1.3.0+）
+    local login_interval=$OFFLINE_AUTH_INTERVAL  # 离线时登录请求发送间隔（v1.3.0+）
 
     while true; do
         offline_loop_count=$((offline_loop_count + 1))
@@ -1344,7 +1373,7 @@ handle_offline_state() {
         local current_time=$(get_timestamp)
         local time_since_check=$((current_time - last_offline_check))
 
-        # 每2秒并行检测DNS
+        # 定期并行检测DNS
         if [ $time_since_check -ge $fast_check_interval ]; then
             last_offline_check=$current_time
 
@@ -1485,6 +1514,21 @@ main() {
             ;;
     esac
 
+    # 新增参数验证（v1.3.0+）
+    case "$OFFLINE_AUTH_INTERVAL" in
+        ''|*[!0-9]*)
+            log_with_level "WARN" "OFFLINE_AUTH_INTERVAL无效或未配置，使用默认值2秒"
+            OFFLINE_AUTH_INTERVAL=2
+            ;;
+    esac
+
+    case "$OFFLINE_HTTP_CHECK_INTERVAL" in
+        ''|*[!0-9]*)
+            log_with_level "WARN" "OFFLINE_HTTP_CHECK_INTERVAL无效或未配置，使用默认值2秒"
+            OFFLINE_HTTP_CHECK_INTERVAL=2
+            ;;
+    esac
+
     case "$DNS_FAILURE_THRESHOLD" in
         ''|*[!0-9]*)
             log_with_level "WARN" "DNS_FAILURE_THRESHOLD无效，使用默认值2"
@@ -1492,15 +1536,35 @@ main() {
             ;;
     esac
 
+    # 新增参数验证（v1.3.1+）
+    case "$LOG_SUSPECT_STATE" in
+        ''|[Nn]*)
+            LOG_SUSPECT_STATE="N"
+            ;;
+        [Yy]*)
+            LOG_SUSPECT_STATE="Y"
+            ;;
+        *)
+            log_with_level "WARN" "LOG_SUSPECT_STATE无效或未配置，使用默认值N（不记录疑似离线日志）"
+            LOG_SUSPECT_STATE="N"
+            ;;
+    esac
+
     # 确保检测频率至少为1秒
     if [ $DNS_CHECK_INTERVAL -lt 1 ]; then
         DNS_CHECK_INTERVAL=1
     fi
-    if [ $AUTH_HTTP_CHECK_INTERVAL -lt 60 ]; then
-        AUTH_HTTP_CHECK_INTERVAL=60
+    if [ $AUTH_HTTP_CHECK_INTERVAL -lt 1 ]; then
+        AUTH_HTTP_CHECK_INTERVAL=1
     fi
     if [ $RECONNECT_INTERVAL -lt 1 ]; then
         RECONNECT_INTERVAL=1
+    fi
+    if [ $OFFLINE_AUTH_INTERVAL -lt 1 ]; then
+        OFFLINE_AUTH_INTERVAL=1
+    fi
+    if [ $OFFLINE_HTTP_CHECK_INTERVAL -lt 1 ]; then
+        OFFLINE_HTTP_CHECK_INTERVAL=1
     fi
 
     log_with_level "INFO" "=== 自动登录服务启动 ==="
@@ -1617,6 +1681,10 @@ DNS_CHECK_INTERVAL="$DNS_CHECK_INTERVAL"
 AUTH_HTTP_CHECK_INTERVAL="$AUTH_HTTP_CHECK_INTERVAL"
 RECONNECT_INTERVAL="$RECONNECT_INTERVAL"
 
+# 离线状态检测配置 (v1.3.0+)
+OFFLINE_AUTH_INTERVAL="$OFFLINE_AUTH_INTERVAL"
+OFFLINE_HTTP_CHECK_INTERVAL="$OFFLINE_HTTP_CHECK_INTERVAL"
+
 # 检测策略配置
 DNS_FAILURE_THRESHOLD="$DNS_FAILURE_THRESHOLD"
 ONLINE_VERIFY_STRATEGY="$ONLINE_VERIFY_STRATEGY"
@@ -1640,6 +1708,9 @@ REALTIME_LOG_SIZE_MB="$REALTIME_LOG_SIZE_MB"
 STAT_INTERVAL="$STAT_INTERVAL"
 OFFLINE_ALERT_THRESHOLD="$OFFLINE_ALERT_THRESHOLD"
 AUTH_FAIL_THRESHOLD="$AUTH_FAIL_THRESHOLD"
+
+# 疑似离线日志记录配置 (v1.3.1+)
+LOG_SUSPECT_STATE="$LOG_SUSPECT_STATE"
 
 # 状态文件路径
 STATE_FILE="/usr/local/autologin/runtime.state"
