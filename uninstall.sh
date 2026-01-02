@@ -18,31 +18,31 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 print_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
+    printf "${GREEN}[INFO]${NC} %s\n" "$1"
 }
 
 print_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+    printf "${YELLOW}[WARN]${NC} %s\n" "$1"
 }
 
 print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    printf "${RED}[ERROR]${NC} %s\n" "$1"
 }
 
 print_step() {
-    echo -e "${BLUE}[STEP]${NC} $1"
+    printf "${BLUE}[STEP]${NC} %s\n" "$1"
 }
 
 # 显示标题
 print_header() {
     echo ""
-    echo -e "${BLUE}========================================"
+    printf "${BLUE}========================================\n"
     echo "  OpenWrt 自动登录服务卸载程序"
-    echo "========================================${NC}"
+    printf "========================================${NC}\n"
     echo ""
 
     # 显示卸载内容说明
-    echo -e "${YELLOW}🗑️  本次卸载将清理以下内容：${NC}"
+    printf "${YELLOW}🗑️  本次卸载将清理以下内容：${NC}\n"
     echo ""
     echo "  📁 标准文件："
     echo "     • 服务脚本: /etc/init.d/autologin"
@@ -59,7 +59,7 @@ print_header() {
     echo "     • 日志切割临时文件"
     echo "     • 备份文件"
     echo ""
-    echo -e "${GREEN}💡 提示: 支持可选配置备份，建议备份后再卸载${NC}"
+    printf "${GREEN}💡 提示: 支持可选配置备份，建议备份后再卸载${NC}\n"
     echo ""
 }
 
@@ -111,12 +111,13 @@ check_installation() {
 
     echo ""
     echo "当前安装状态:"
-    echo -e "$status"
+    printf "%b\n" "$status"
 
     if [ $installed -eq 0 ]; then
         print_warn "未检测到安装的组件"
         echo ""
-        read -p "是否清理可能残留的文件? (y/n): " cleanup_anyway
+        printf "是否清理可能残留的文件? (y/n): "
+        read cleanup_anyway
         if [ "$cleanup_anyway" != "y" ] && [ "$cleanup_anyway" != "Y" ]; then
             print_info "卸载已取消"
             exit 0
@@ -138,7 +139,8 @@ confirm_uninstall() {
     echo "  - 所有日志文件"
     echo ""
 
-    read -p "是否要备份配置文件? (y/n) [推荐: y]: " do_backup
+    printf "是否要备份配置文件? (y/n) [推荐: y]: "
+    read do_backup
     if [ "$do_backup" = "y" ] || [ "$do_backup" = "Y" ]; then
         BACKUP_ENABLED=1
     else
@@ -146,7 +148,8 @@ confirm_uninstall() {
     fi
 
     echo ""
-    read -p "确认卸载? (yes/no): " confirm
+    printf "确认卸载? (yes/no): "
+    read confirm
     if [ "$confirm" != "yes" ] && [ "$confirm" != "YES" ]; then
         print_info "卸载已取消"
         exit 0

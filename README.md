@@ -4,7 +4,7 @@
 
 > 在OpenWRT上部署，然后忘掉校园网要登录这件事~
 
-**当前版本**: v1.3.1 (2025-12-05)
+**当前版本**: v1.3.2 (2026-01-02)
 
 **特别鸣谢[xhzLK123](https://github.com/xhzLK123)提供的登录方法**
 
@@ -12,6 +12,8 @@
 
 - ✅ 交互式配置（账号、密码、检测频率、日志选项）
 - ✅ 四状态机检测在线情况，远程+本地FB多机制防止误判 **[v1.2.0b]**
+- ✅ 离线认证保护机制（最大尝试次数+冷却期）**[v1.3.2]**
+- ✅ 完整BusyBox兼容性（wget短选项、read/echo命令）**[v1.3.2]**
 - ✅ 灵活的日志管理（文件日志、syslog、禁用）
 - ✅ 更低的日志占用：运行1天只产生100kB左右实时日志（占用内存）和0.1KB左右运行日志（占用闪存）
 - ✅ 智能双层日志系统（实时+持久化故障日志）**[v1.2.0b]**
@@ -101,6 +103,12 @@ sh /tmp/install.sh
 
 **离线状态重连配置**:
 - 离线重连等待时间 (默认: 3秒)
+
+**离线认证保护配置** **[v1.3.2]**:
+- 离线时最大认证尝试次数 (默认: 20次)
+- 达到最大尝试次数后冷却时间 (默认: 300秒)
+- 说明: 防止离线时无限制发送认证请求，避免给服务器造成过大压力
+- 冷却期间暂停认证，结束后重置计数器继续尝试
 
 **DNS离线判定策略**:
 1. 任何1个DNS失败就离线 (最敏感，快速反应，可能误判)
@@ -215,6 +223,10 @@ RECONNECT_INTERVAL="3"            # 离线重连等待时间
 OFFLINE_AUTH_INTERVAL="2"         # 离线时登录请求间隔
 OFFLINE_HTTP_CHECK_INTERVAL="2"   # 离线时状态查询间隔
 
+# 离线认证保护配置 (v1.3.2+)
+OFFLINE_AUTH_MAX_ATTEMPTS="20"    # 离线时最大认证次数
+OFFLINE_COOLDOWN_SECONDS="300"    # 达到最大次数后冷却时间
+
 # 检测策略配置
 DNS_FAILURE_THRESHOLD="2"         # DNS离线判定阈值 (1/2/999)
 ONLINE_VERIFY_STRATEGY="2"        # 在线判定策略 (1=仅DNS, 2=DNS+HTTP)
@@ -228,9 +240,19 @@ DNS_TEST_SERVERS="119.29.29.29 223.5.5.5 1.1.1.1"
 
 # 日志配置
 LOG_TYPE="1"                      # 1=文件, 2=syslog, 3=禁用
-LOG_FILE="/usr/local/autologin/logs/autologin.log"
-LOG_SIZE_MB="10"                  # 日志大小限制 (MB)
+
+# 日志系统配置 (LOG_TYPE=1 文件模式专用)
+REALTIME_LOG_FILE="/tmp/autologin/autologin.log"           # 实时日志
+PERSISTENT_LOG_FILE="/usr/local/autologin/logs/persistent.log"  # 持久化日志
+REALTIME_LOG_SIZE_MB="2"          # 实时日志切割阈值
+LOG_SIZE_MB="10"                  # 持久化日志大小限制
+STAT_INTERVAL="3600"              # 状态摘要间隔 (秒)
+OFFLINE_ALERT_THRESHOLD="3"       # 离线次数告警阈值
+AUTH_FAIL_THRESHOLD="3"           # 连续认证失败告警阈值
 LOG_SUSPECT_STATE="N"             # 记录疑似离线日志 (v1.3.1+)
+
+# 状态文件路径
+STATE_FILE="/usr/local/autologin/runtime.state"
 ```
 
 修改后重启服务使配置生效：

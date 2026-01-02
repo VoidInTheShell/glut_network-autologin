@@ -3,16 +3,16 @@
 # OpenWrt 自动登录服务安装脚本
 # 自动检测环境、安装依赖、配置服务
 #
-# 版本: v1.3.1 (2025-12-05)
-# 更新: 疑似离线日志可配置
+# 版本: v1.3.2 (2026-01-02)
+# 更新: BusyBox兼容性修复与离线认证保护
 #
 
 set -e
 
 # 版本信息
-VERSION="v1.3.1"
-VERSION_DATE="2025-12-05"
-VERSION_DESC="疑似离线日志可配置"
+VERSION="v1.3.2"
+VERSION_DATE="2026-01-02"
+VERSION_DESC="BusyBox兼容性修复与离线认证保护"
 
 INSTALL_DIR="/usr/local/autologin"
 CONFIG_FILE="/etc/config/autologin"
@@ -26,15 +26,15 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 print_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
+    printf "${GREEN}[INFO]${NC} %s\n" "$1"
 }
 
 print_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+    printf "${YELLOW}[WARN]${NC} %s\n" "$1"
 }
 
 print_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    printf "${RED}[ERROR]${NC} %s\n" "$1"
 }
 
 # 检测是否为 OpenWrt 系统
@@ -42,7 +42,8 @@ check_system() {
     print_info "检测系统环境..."
     if [ ! -f "/etc/openwrt_release" ]; then
         print_warn "警告: 未检测到 OpenWrt 系统标识文件"
-        read -p "是否继续安装? (y/n): " confirm
+        printf "是否继续安装? (y/n): "
+        read confirm
         if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
             exit 1
         fi
@@ -137,24 +138,30 @@ interactive_config() {
     WAN_IF=$(get_wan_interface)
     if [ -n "$WAN_IF" ]; then
         print_info "自动检测到 WAN 接口: $WAN_IF"
-        read -p "是否使用此接口? (Y/n): " use_auto
+        printf "是否使用此接口? (Y/n): "
+        read use_auto
         if [ "$use_auto" = "n" ] || [ "$use_auto" = "N" ]; then
-            read -p "请输入 WAN 接口名称: " WAN_IF
+            printf "请输入 WAN 接口名称: "
+            read WAN_IF
         fi
     else
-        read -p "请输入 WAN 接口名称 (如 eth1): " WAN_IF
+        printf "请输入 WAN 接口名称 (如 eth1): "
+        read WAN_IF
     fi
 
     # 账号密码
-    read -p "请输入登录账号: " USER_ACCOUNT
-    read -s -p "请输入登录密码: " USER_PASSWORD
+    printf "请输入登录账号: "
+    read USER_ACCOUNT
+    printf "请输入登录密码: "
+    read -s USER_PASSWORD
     echo ""
 
     # 运营商选择
     echo "请选择运营商:"
     echo "  1) 联通"
     echo "  2) 移动"
-    read -p "请输入选项 (1/2) [默认: 1]: " ISP_CHOICE
+    printf "请输入选项 (1/2) [默认: 1]: "
+    read ISP_CHOICE
     ISP_CHOICE=${ISP_CHOICE:-1}
 
     # 检测策略配置
@@ -169,23 +176,39 @@ interactive_config() {
 
     # 在线状态检测频率
     print_info "在线状态检测频率"
-    read -p "公网DNS检测频率 (秒) [默认: 10]: " DNS_CHECK_INTERVAL
+    printf "公网DNS检测频率 (秒) [默认: 10]: "
+    read DNS_CHECK_INTERVAL
     DNS_CHECK_INTERVAL=${DNS_CHECK_INTERVAL:-10}
 
     # 离线状态检测配置
     echo ""
     print_info "离线状态检测配置"
     echo "当检测到离线时，系统会尝试重新认证并检测登录状态"
-    read -p "离线时登录请求发送间隔 (秒) [默认: 2]: " OFFLINE_AUTH_INTERVAL
+    printf "离线时登录请求发送间隔 (秒) [默认: 2]: "
+    read OFFLINE_AUTH_INTERVAL
     OFFLINE_AUTH_INTERVAL=${OFFLINE_AUTH_INTERVAL:-2}
 
-    read -p "离线时本地登录状态查询间隔 (秒) [默认: 2]: " OFFLINE_HTTP_CHECK_INTERVAL
+    printf "离线时本地登录状态查询间隔 (秒) [默认: 2]: "
+    read OFFLINE_HTTP_CHECK_INTERVAL
     OFFLINE_HTTP_CHECK_INTERVAL=${OFFLINE_HTTP_CHECK_INTERVAL:-2}
+
+    # 离线认证保护配置
+    echo ""
+    print_info "离线认证保护配置"
+    echo "防止离线时无限制发送认证请求，避免给服务器造成压力"
+    printf "离线时最大认证尝试次数 [默认: 20]: "
+    read OFFLINE_AUTH_MAX_ATTEMPTS
+    OFFLINE_AUTH_MAX_ATTEMPTS=${OFFLINE_AUTH_MAX_ATTEMPTS:-20}
+
+    printf "达到最大尝试次数后冷却时间 (秒) [默认: 300]: "
+    read OFFLINE_COOLDOWN_SECONDS
+    OFFLINE_COOLDOWN_SECONDS=${OFFLINE_COOLDOWN_SECONDS:-300}
 
     # 离线状态重连配置（保留用于兼容性）
     echo ""
     print_info "离线状态重连配置"
-    read -p "离线重连等待时间 (秒) [默认: 3]: " RECONNECT_INTERVAL
+    printf "离线重连等待时间 (秒) [默认: 3]: "
+    read RECONNECT_INTERVAL
     RECONNECT_INTERVAL=${RECONNECT_INTERVAL:-3}
 
     # DNS失败阈值配置
@@ -195,7 +218,8 @@ interactive_config() {
     echo "  1) 任何1个DNS失败就离线 (最敏感，快速反应，可能误判)"
     echo "  2) 至少2个DNS失败才离线 (推荐，平衡误判和延迟)"
     echo "  3) 所有DNS都失败才离线 (最保守，可能延迟发现断线)"
-    read -p "请选择策略 (1/2/3) [默认: 2]: " DNS_FAILURE_THRESHOLD_OPTION
+    printf "请选择策略 (1/2/3) [默认: 2]: "
+    read DNS_FAILURE_THRESHOLD_OPTION
     DNS_FAILURE_THRESHOLD_OPTION=${DNS_FAILURE_THRESHOLD_OPTION:-2}
 
     case "$DNS_FAILURE_THRESHOLD_OPTION" in
@@ -210,14 +234,16 @@ interactive_config() {
     echo "从离线恢复到在线状态的条件："
     echo "  1) 仅依赖DNS检测 (达到DNS阈值即判定在线)"
     echo "  2) DNS + HTTP双重验证 (至少1个DNS可达 + 本地HTTP在线)"
-    read -p "请选择策略 (1/2) [默认: 2]: " ONLINE_VERIFY_STRATEGY
+    printf "请选择策略 (1/2) [默认: 2]: "
+    read ONLINE_VERIFY_STRATEGY
     ONLINE_VERIFY_STRATEGY=${ONLINE_VERIFY_STRATEGY:-2}
 
     # 公网DNS服务器配置
     echo ""
     print_info "公网DNS服务器配置"
     echo "用于辅助验证网络连通性（负载均衡轮询）"
-    read -p "公网DNS服务器 [默认: 119.29.29.29 223.5.5.5 1.1.1.1]: " DNS_TEST_SERVERS
+    printf "公网DNS服务器 [默认: 119.29.29.29 223.5.5.5 1.1.1.1]: "
+    read DNS_TEST_SERVERS
     DNS_TEST_SERVERS=${DNS_TEST_SERVERS:-"119.29.29.29 223.5.5.5 1.1.1.1"}
 
     # 固定启用的检测方法（移除公网HTTP重定向）
@@ -233,7 +259,8 @@ interactive_config() {
     echo "  1) 输出到文件 (智能日志系统，故障分析优化)"
     echo "  2) 输出到 syslog (系统日志)"
     echo "  3) 输出到 /dev/null (不记录)"
-    read -p "请输入选项 (1/2/3) [默认: 1]: " LOG_TYPE
+    printf "请输入选项 (1/2/3) [默认: 1]: "
+    read LOG_TYPE
     LOG_TYPE=${LOG_TYPE:-1}
 
     if [ "$LOG_TYPE" = "1" ]; then
@@ -243,22 +270,27 @@ interactive_config() {
         echo "  • 实时日志: /tmp/autologin/ (内存，快速写入)"
         echo "  • 持久化日志: /usr/local/autologin/logs/persistent.log (仅保留故障事件)"
         echo ""
-        read -p "持久化故障日志大小限制 (MB) [默认: 10]: " LOG_SIZE_MB
+        printf "持久化故障日志大小限制 (MB) [默认: 10]: "
+        read LOG_SIZE_MB
         LOG_SIZE_MB=${LOG_SIZE_MB:-10}
-        read -p "实时日志切割阈值 (MB) [默认: 2]: " REALTIME_LOG_SIZE_MB
+        printf "实时日志切割阈值 (MB) [默认: 2]: "
+        read REALTIME_LOG_SIZE_MB
         REALTIME_LOG_SIZE_MB=${REALTIME_LOG_SIZE_MB:-2}
 
         # 告警阈值配置
         echo ""
         print_info "故障告警阈值配置"
-        read -p "离线次数告警阈值 (次/小时) [默认: 3]: " OFFLINE_ALERT_THRESHOLD
+        printf "离线次数告警阈值 (次/小时) [默认: 3]: "
+        read OFFLINE_ALERT_THRESHOLD
         OFFLINE_ALERT_THRESHOLD=${OFFLINE_ALERT_THRESHOLD:-3}
-        read -p "连续认证失败告警阈值 (次) [默认: 3]: " AUTH_FAIL_THRESHOLD
+        printf "连续认证失败告警阈值 (次) [默认: 3]: "
+        read AUTH_FAIL_THRESHOLD
         AUTH_FAIL_THRESHOLD=${AUTH_FAIL_THRESHOLD:-3}
 
         # 状态摘要间隔
         echo ""
-        read -p "状态摘要输出间隔 (秒) [默认: 3600 (1小时)]: " STAT_INTERVAL
+        printf "状态摘要输出间隔 (秒) [默认: 3600 (1小时)]: "
+        read STAT_INTERVAL
         STAT_INTERVAL=${STAT_INTERVAL:-3600}
 
         # 疑似离线日志记录配置
@@ -266,7 +298,8 @@ interactive_config() {
         print_info "疑似离线日志记录配置"
         echo "网络波动时会频繁触发疑似离线状态，记录这些信息会导致日志量增大"
         echo "建议：网络稳定环境选择 N，网络波动大需要调试时选择 Y"
-        read -p "是否记录疑似离线信息到持久化日志? (Y/N) [默认: N]: " LOG_SUSPECT_STATE
+        printf "是否记录疑似离线信息到持久化日志? (Y/N) [默认: N]: "
+        read LOG_SUSPECT_STATE
         LOG_SUSPECT_STATE=${LOG_SUSPECT_STATE:-N}
 
         LOG_DIR="$INSTALL_DIR/logs"
@@ -306,6 +339,8 @@ interactive_config() {
     echo "    登录请求间隔: ${OFFLINE_AUTH_INTERVAL} 秒"
     echo "    状态查询间隔: ${OFFLINE_HTTP_CHECK_INTERVAL} 秒"
     echo "    重连等待时间: ${RECONNECT_INTERVAL} 秒"
+    echo "    最大认证次数: ${OFFLINE_AUTH_MAX_ATTEMPTS} 次"
+    echo "    冷却时间: ${OFFLINE_COOLDOWN_SECONDS} 秒"
     echo ""
     echo "  判定策略:"
     case "$DNS_FAILURE_THRESHOLD" in
@@ -334,7 +369,8 @@ interactive_config() {
     fi
     echo ""
 
-    read -p "确认以上配置并继续安装? (y/n): " confirm
+    printf "确认以上配置并继续安装? (y/n): "
+    read confirm
     if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
         print_error "安装已取消"
         exit 1
@@ -723,6 +759,10 @@ log_with_level() {
 
     if [ "$LOG_TYPE" = "1" ]; then
         # 文件日志模式：写入实时日志
+        # 确保实时日志目录存在（/tmp为RAM盘，重启后消失）
+        local realtime_log_dir=$(dirname "$REALTIME_LOG_FILE")
+        [ ! -d "$realtime_log_dir" ] && mkdir -p "$realtime_log_dir"
+
         echo "$log_line" >> "$REALTIME_LOG_FILE"
 
         # 故障级别日志同时写入持久化日志（立即写入，不等待切割）
@@ -956,7 +996,7 @@ do_login() {
     local url="http://${AUTH_SERVER}:${AUTH_PORT_801}/eportal/portal/login?callback=dr1003&login_method=1&user_account=%2C0%2C${USER_ACCOUNT}&user_password=${USER_PASSWORD}&wlan_user_ip=${current_ip}&wlan_user_ipv6=&wlan_user_mac=000000000000&wlan_ac_ip=&wlan_ac_name=&page_index=pMnaGv1756888844&authex_enable=${ISP_CHOICE}&jsVersion=4.2.1&terminal_type=1&lang=zh-cn&lang=zh"
 
     # 执行登录请求
-    local response=$(wget -qO- --timeout=5 "$url" 2>&1)
+    local response=$(wget -T 5 -q -O - "$url" 2>&1)
 
     # 解析响应（简化版，提取关键信息）
     if echo "$response" | grep -q "success"; then
@@ -990,7 +1030,7 @@ check_auth_http() {
     fi
 
     local check_url="http://${AUTH_SERVER}/drcom/chkstatus?callback=dr1002&jsVersion=4.X&v=1523&lang=zh"
-    local response=$(wget --timeout=2 --tries=1 -qO- "$check_url" 2>&1)
+    local response=$(wget -T 2 -t 1 -q -O - "$check_url" 2>&1)
     local wget_exit=$?
 
     if [ $wget_exit -eq 0 ]; then
@@ -1013,7 +1053,7 @@ check_auth_http_with_log() {
 
     local check_url="http://${AUTH_SERVER}/drcom/chkstatus?callback=dr1002&jsVersion=4.X&v=1523&lang=zh"
     local temp_file="/tmp/auth_http_check.$$"
-    local response=$(wget --timeout=2 --tries=1 --server-response -qO- "$check_url" 2>&1 | tee "$temp_file")
+    local response=$(wget -T 2 -t 1 -S -q -O - "$check_url" 2>&1 | tee "$temp_file")
     local wget_exit=$?
 
     # 提取HTTP状态码
@@ -1361,6 +1401,7 @@ handle_offline_state() {
     OFFLINE_PARALLEL_FAIL_LIST=""
     OFFLINE_AUTH_RESPONSE=""
     AUTH_ATTEMPT_COUNT=0
+    COOLDOWN_END_TIME=0  # 冷却结束时间戳
 
     # 记录离线事件
     increment_state "OFFLINE_COUNT"
@@ -1442,7 +1483,25 @@ handle_offline_state() {
 
         # 智能登录：DNS失败或HTTP离线时才登录
         local time_since_login=$((current_time - last_login_attempt))
+
+        # 检查是否在冷却期
+        if [ $current_time -lt $COOLDOWN_END_TIME ]; then
+            # 仍在冷却期，跳过登录但继续检测
+            continue
+        fi
+
+        # 检查是否需要发送登录请求
         if [ $time_since_login -ge $login_interval ]; then
+            # 检查是否达到最大认证次数
+            if [ $AUTH_ATTEMPT_COUNT -ge $OFFLINE_AUTH_MAX_ATTEMPTS ]; then
+                log_with_level "WARN" "已达到最大认证次数 ($OFFLINE_AUTH_MAX_ATTEMPTS)，进入冷却期 ($OFFLINE_COOLDOWN_SECONDS 秒)"
+                # 设置冷却结束时间（继续DNS/HTTP检测，仅暂停登录）
+                COOLDOWN_END_TIME=$((current_time + OFFLINE_COOLDOWN_SECONDS))
+                # 重置认证计数器
+                AUTH_ATTEMPT_COUNT=0
+                continue
+            fi
+
             if [ $((offline_loop_count % 3)) -eq 0 ]; then
                 log_with_level "AUTH" "网络仍离线 (循环 #$offline_loop_count)，继续尝试登录..."
             fi
@@ -1553,6 +1612,21 @@ main() {
             ;;
     esac
 
+    # 新增参数验证（v1.3.2+）
+    case "$OFFLINE_AUTH_MAX_ATTEMPTS" in
+        ''|*[!0-9]*)
+            log_with_level "WARN" "OFFLINE_AUTH_MAX_ATTEMPTS无效或未配置，使用默认值20次"
+            OFFLINE_AUTH_MAX_ATTEMPTS=20
+            ;;
+    esac
+
+    case "$OFFLINE_COOLDOWN_SECONDS" in
+        ''|*[!0-9]*)
+            log_with_level "WARN" "OFFLINE_COOLDOWN_SECONDS无效或未配置，使用默认值300秒"
+            OFFLINE_COOLDOWN_SECONDS=300
+            ;;
+    esac
+
     case "$DNS_FAILURE_THRESHOLD" in
         ''|*[!0-9]*)
             log_with_level "WARN" "DNS_FAILURE_THRESHOLD无效，使用默认值2"
@@ -1589,6 +1663,12 @@ main() {
     fi
     if [ $OFFLINE_HTTP_CHECK_INTERVAL -lt 1 ]; then
         OFFLINE_HTTP_CHECK_INTERVAL=1
+    fi
+    if [ $OFFLINE_AUTH_MAX_ATTEMPTS -lt 1 ]; then
+        OFFLINE_AUTH_MAX_ATTEMPTS=1
+    fi
+    if [ $OFFLINE_COOLDOWN_SECONDS -lt 1 ]; then
+        OFFLINE_COOLDOWN_SECONDS=1
     fi
 
     log_with_level "INFO" "=== 自动登录服务启动 ==="
@@ -1708,6 +1788,10 @@ RECONNECT_INTERVAL="$RECONNECT_INTERVAL"
 # 离线状态检测配置 (v1.3.0+)
 OFFLINE_AUTH_INTERVAL="$OFFLINE_AUTH_INTERVAL"
 OFFLINE_HTTP_CHECK_INTERVAL="$OFFLINE_HTTP_CHECK_INTERVAL"
+
+# 离线认证保护配置 (v1.3.2+)
+OFFLINE_AUTH_MAX_ATTEMPTS="$OFFLINE_AUTH_MAX_ATTEMPTS"
+OFFLINE_COOLDOWN_SECONDS="$OFFLINE_COOLDOWN_SECONDS"
 
 # 检测策略配置
 DNS_FAILURE_THRESHOLD="$DNS_FAILURE_THRESHOLD"
@@ -1850,23 +1934,28 @@ main() {
     echo ""
 
     # 显示版本更新信息
-    echo -e "${GREEN}📦 $VERSION 新版本特性 ($VERSION_DESC)${NC}"
+    printf "${GREEN}📦 $VERSION 新版本特性 ($VERSION_DESC)${NC}\n"
     echo ""
     echo "🔧 关键问题修复："
-    echo "   • persistent.log 立即写入（不等待切割）"
-    echo "   • 移除禁ping误判逻辑（DNS+HTTP双重验证）"
-    echo "   • DNS统计动态生成（适配用户配置）"
-    echo "   • 时间显示格式优化（人类可读）"
+    echo "   • wget命令BusyBox兼容性（短选项替代长选项）"
+    echo "   • /tmp目录自动创建（解决重启后日志丢失）"
+    echo "   • 离线认证保护机制（最大尝试次数+冷却期）"
+    echo "   • read -p 和 echo -e 命令兼容性修复"
     echo ""
-    echo "✨ 继承 v1.2.0b 特性："
+    echo "✨ 新增功能："
+    echo "   • 离线认证保护（可配置最大尝试次数和冷却时间）"
+    echo "   • 冷却期默认300秒，防止服务器压力过大"
+    echo ""
+    echo "✨ 继承特性："
     echo "   • 双层日志架构（实时+持久化）"
     echo "   • 完整运行统计与故障追踪"
     echo "   • 结构化日志级别与智能切割"
     echo "   • 智能告警机制"
     echo ""
-    echo -e "${YELLOW}💡 提示: 从 v1.2.0b 升级无破坏性变更，配置完全兼容${NC}"
+    printf "${YELLOW}💡 提示: 从 v1.3.1 升级无破坏性变更，配置兼容${NC}\n"
     echo ""
-    read -p "按回车键继续安装..."
+    printf "按回车键继续安装..."
+    read dummy
     echo ""
 
     check_system

@@ -1,6 +1,6 @@
 # 自动登录服务配置文件示例
 #
-# 版本: v1.3.1
+# 版本: v1.3.2
 # 此文件展示了所有可配置的选项
 # 实际配置文件会在安装时自动生成到：/etc/config/autologin
 
@@ -53,6 +53,17 @@ OFFLINE_AUTH_INTERVAL="2"
 # 推荐值：2-5秒
 # 说明：检测到离线后，每隔多久查询一次登录状态
 OFFLINE_HTTP_CHECK_INTERVAL="2"
+
+# 离线认证保护配置（v1.3.2+）
+# 离线时最大认证尝试次数
+# 推荐值：10-30次
+# 说明：达到最大次数后进入冷却期，避免给服务器造成过大压力
+OFFLINE_AUTH_MAX_ATTEMPTS="20"
+
+# 达到最大认证次数后冷却时间（单位：秒）
+# 推荐值：180-600秒
+# 说明：冷却期间暂停认证请求，冷却结束后重置计数器
+OFFLINE_COOLDOWN_SECONDS="300"
 
 # 离线状态重连等待时间（单位：秒）
 # 推荐值：3-5秒
@@ -250,13 +261,23 @@ STATE_FILE="/usr/local/autologin/runtime.state"
 #    - 仅启用必要的检测方法
 #    - 适当调整告警阈值，减少不必要的告警
 
-# 9. v1.3.1 更新说明：
+# 9. v1.3.2 更新说明：
+#    - 新增 OFFLINE_AUTH_MAX_ATTEMPTS 参数（离线最大认证次数）
+#    - 新增 OFFLINE_COOLDOWN_SECONDS 参数（冷却时间）
+#    - 修复 wget 命令 BusyBox 兼容性（GNU长选项改为短选项）
+#    - 修复 /tmp 目录重启后消失问题（自动创建）
+#    - 修复 read -p 和 echo -e 命令兼容性问题
+#
+# 10. v1.3.1 更新说明：
 #    - 新增 OFFLINE_AUTH_INTERVAL 和 OFFLINE_HTTP_CHECK_INTERVAL 参数
 #    - 新增 LOG_SUSPECT_STATE 参数（控制疑似离线日志记录）
 #    - 废弃 AUTH_HTTP_CHECK_INTERVAL（仅保留用于兼容）
 #    - 修复 runtime.state 初始化和字段排序问题
 
 # ==================== 配置兼容性 ====================
+
+# v1.3.2+ 新增配置项：
+#   OFFLINE_AUTH_MAX_ATTEMPTS, OFFLINE_COOLDOWN_SECONDS
 
 # v1.3.0+ 新增配置项：
 #   OFFLINE_AUTH_INTERVAL, OFFLINE_HTTP_CHECK_INTERVAL
